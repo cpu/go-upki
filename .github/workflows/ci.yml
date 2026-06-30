@@ -79,7 +79,99 @@ jobs:
           go-version-file: go.mod
 
       - name: Run tests
-        run: go test ./...
+        run: go test -race ./...
 
       - name: Run go vet
         run: go vet ./...
+
+  integration:
+    # Exercises the env-gated tests in upki/ against a real upki cache:
+    # clone rustls/upki at a pinned rev, run `upki fetch`, re-encode the
+    # filters into V4 with tools/crlite-reencode, and run the Go tests
+    # with UPKI_CACHE_DIR pointing at the re-encoded cache.
+    #
+    # TODO(XXX): Once upstream is fetching V4 CRLite filters, remove the
+    #   tools/crlite-renencode bits.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      UPKI_REV: b68d7deaee0837bae29ef34fb3c4b1f11fda35ac
+      UPKI_CACHE_DIR: ${{ github.workspace }}/_cache/go-upki
+    steps:
+      - name: Check out go-upki
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Check out rustls/upki at pinned rev
+        uses: actions/checkout@v7
+        with:
+          repository: rustls/upki
+          ref: ${{ env.UPKI_REV }}
+          path: _upstream/upki
+          persist-credentials: false
+
+      - name: Cache Cargo registry + git deps
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-${{ env.UPKI_REV }}-${{ hashFiles('tools/crlite-reencode/Cargo.toml', '_upstream/upki/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-${{ env.UPKI_REV }}-
+            ${{ runner.os }}-cargo-
+
+      - name: Cache rustls/upki target/
+        uses: actions/cache@v4
+        with:
+          path: _upstream/upki/target
+          key: ${{ runner.os }}-target-upki-${{ env.UPKI_REV }}
+          restore-keys: |
+            ${{ runner.os }}-target-upki-
+
+      - name: Cache crlite-reencode target/
+        uses: actions/cache@v4
+        with:
+          path: tools/crlite-reencode/target
+          key: ${{ runner.os }}-target-reencode-${{ hashFiles('tools/crlite-reencode/Cargo.toml', 'tools/crlite-reencode/src/**') }}
+          restore-keys: |
+            ${{ runner.os }}-target-reencode-
+
+      - name: Build upki CLI
+        working-directory: _upstream/upki
+        run: cargo build --release --package upki-cli
+
+      - name: Build crlite-reencode
+        working-directory: tools/crlite-reencode
+        run: cargo build --release
+
+      - name: Fetch upki revocation data
+        env:
+          # upki fetch reads cache_dir from config.toml; point it at a
+          # workspace-local path so we don't depend on $HOME state and
+          # the cached directory is reproducible per-run.
+          XDG_CACHE_HOME: ${{ github.workspace }}/_cache
+          XDG_CONFIG_HOME: ${{ github.workspace }}/_cache/config
+        run: |
+          mkdir -p "$XDG_CONFIG_HOME/upki"
+          cat > "$XDG_CONFIG_HOME/upki/config.toml" <<EOF
+          cache-dir = "${{ github.workspace }}/_cache/upki"
+          [revocation]
+          fetch-url = "https://upki.rustls.dev/revocation/"
+          EOF
+          _upstream/upki/target/release/upki fetch
+
+      - name: Re-encode filters as V4
+        run: |
+          tools/crlite-reencode/target/release/crlite-reencode \
+            --src ${{ github.workspace }}/_cache/upki \
+            --dest ${{ env.UPKI_CACHE_DIR }}
+
+      - name: Run Go tests against re-encoded cache
+        run: go test -race ./...

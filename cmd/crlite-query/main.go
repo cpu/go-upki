@@ -17,10 +17,8 @@ import (
 	"os"
 	"time"
 
-	"golang.org/x/crypto/cryptobyte"
-	"golang.org/x/crypto/cryptobyte/asn1"
-
 	"github.com/cpu/go-upki/crlite"
+	"github.com/cpu/go-upki/upki"
 )
 
 func main() {
@@ -63,13 +61,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	scts, err := embeddedSCTs(ee)
+	scts, err := upki.EmbeddedSCTs(ee)
 	if err != nil || len(scts) == 0 {
 		fmt.Fprintln(os.Stderr, "End entity certificate has no SCTs")
 		os.Exit(1)
 	}
 
-	rawSerial, err := rawSerial(ee)
+	rawSerial, err := upki.RawSerial(ee)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Could not extract serial: %v\n", err)
 		os.Exit(1)
@@ -96,118 +94,4 @@ func readCert(path string) (*x509.Certificate, error) {
 	}
 
 	return x509.ParseCertificate(der)
-}
-
-// rawSerial pulls the certificate's serial INTEGER out of RawTBSCertificate
-// as its DER-encoded contents, preserving any leading sign byte.
-//
-//	TBSCertificate ::= SEQUENCE {
-//	    version [0] EXPLICIT INTEGER DEFAULT v1,
-//	    serialNumber CertificateSerialNumber,
-//	    ...
-//	}
-func rawSerial(c *x509.Certificate) ([]byte, error) {
-	tbs := cryptobyte.String(c.RawTBSCertificate)
-	var inner cryptobyte.String
-	if !tbs.ReadASN1(&inner, asn1.SEQUENCE) {
-		return nil, fmt.Errorf("malformed tbsCertificate")
-	}
-
-	// Skip optional [0] EXPLICIT version, if present.
-	if inner.PeekASN1Tag(asn1.Tag(0).Constructed().ContextSpecific()) {
-		var version cryptobyte.String
-		if !inner.ReadASN1(&version, asn1.Tag(0).Constructed().ContextSpecific()) {
-			return nil, fmt.Errorf("malformed version")
-		}
-	}
-
-	var serial cryptobyte.String
-	if !inner.ReadASN1(&serial, asn1.INTEGER) {
-		return nil, fmt.Errorf("malformed serial")
-	}
-
-	return serial, nil
-}
-
-// embeddedSCTs decodes the SignedCertificateTimestampList extension (RFC 6962
-// §3.3) and returns each SCT's log id and timestamp.
-//
-// The extension value is an OCTET STRING whose contents are the TLS-encoded:
-//
-//	opaque SerializedSCT<1..2^16-1>;
-//	struct { SerializedSCT sct_list<1..2^16-1>; } SignedCertificateTimestampList;
-//
-// and each SerializedSCT is a TLS-encoded:
-//
-//	struct {
-//	  Version sct_version;            // u8, v1 == 0
-//	  LogID id;                       // 32 bytes
-//	  uint64 timestamp;
-//	  CtExtensions extensions;        // opaque<0..2^16-1>
-//	  digitally-signed struct { ... } signature;
-//	} SignedCertificateTimestamp;
-func embeddedSCTs(c *x509.Certificate) ([]sct, error) {
-	var raw []byte
-	for _, ext := range c.Extensions {
-		// OID 1.3.6.1.4.1.11129.2.4.2 (RFC 6962 §3.3).
-		if ext.Id.Equal([]int{1, 3, 6, 1, 4, 1, 11129, 2, 4, 2}) {
-			raw = ext.Value
-			break
-		}
-	}
-	if raw == nil {
-		return nil, nil
-	}
-
-	// Strip the outer OCTET STRING wrapper.
-	outer := cryptobyte.String(raw)
-	var inner cryptobyte.String
-	if !outer.ReadASN1(&inner, asn1.OCTET_STRING) || !outer.Empty() {
-		return nil, fmt.Errorf("malformed SCT extension")
-	}
-
-	var listBytes cryptobyte.String
-	if !inner.ReadUint16LengthPrefixed(&listBytes) || !inner.Empty() {
-		return nil, fmt.Errorf("malformed SCT list")
-	}
-
-	var out []sct
-	for !listBytes.Empty() {
-		var serialized cryptobyte.String
-		if !listBytes.ReadUint16LengthPrefixed(&serialized) {
-			return nil, fmt.Errorf("malformed serialized SCT")
-		}
-
-		var version uint8
-		if !serialized.ReadUint8(&version) || version != 0 {
-			return nil, fmt.Errorf("unsupported SCT version")
-		}
-
-		var s sct
-		if !serialized.CopyBytes(s.LogID[:]) {
-			return nil, fmt.Errorf("malformed SCT log id")
-		}
-
-		var ts uint64
-		if !serialized.ReadUint64(&ts) {
-			return nil, fmt.Errorf("malformed SCT timestamp")
-		}
-		s.Timestamp = crlite.Timestamp(ts)
-
-		// Skip extensions and signature; we don't need them.
-		var ext cryptobyte.String
-		if !serialized.ReadUint16LengthPrefixed(&ext) {
-			return nil, fmt.Errorf("malformed SCT extensions")
-		}
-
-		// The remainder is the digitally-signed signature; ignore.
-		out = append(out, s)
-	}
-
-	return out, nil
-}
-
-type sct struct {
-	LogID     crlite.LogId
-	Timestamp crlite.Timestamp
 }

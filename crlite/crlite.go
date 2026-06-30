@@ -1,3 +1,9 @@
+// Package crlite implements parsing and lookups for Mozilla CRLite clubcard
+// filters (V4 encoded).
+//
+// Typically, you will want to use the higher-level Go upki package instead of
+// this lower-level package in order to perform efficient revocation checking
+// using a directory of cached filters.
 package crlite
 
 import (
