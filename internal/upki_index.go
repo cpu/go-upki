@@ -117,12 +117,16 @@ func NewIndexFromReader(r io.ReaderAt, closer io.Closer) (*Index, error) {
 	numFilenames := int(header[8])
 	numLogs := int(binary.BigEndian.Uint32(header[9:13]))
 
-	filenamesBuf := make([]byte, numFilenames*filenameSize)
-	off := int64(headerSize)
-	if _, err := readFullAt(r, filenamesBuf, off); err != nil {
-		return nil, fmt.Errorf("%w: read filename table: %w", errInvalidIndex, err)
+	// Filename table and log dir are contiguous and their sizes are fully
+	// determined by the header, so fetch both in one ReadAt.
+	filenamesLen := numFilenames * filenameSize
+	logDirLen := numLogs * logDirEntrySize
+	tables := make([]byte, filenamesLen+logDirLen)
+	if _, err := readFullAt(r, tables, int64(headerSize)); err != nil {
+		return nil, fmt.Errorf("%w: read tables: %w", errInvalidIndex, err)
 	}
-	off += int64(len(filenamesBuf))
+	filenamesBuf := tables[:filenamesLen]
+	logDir := tables[filenamesLen:]
 
 	filenames := make([]string, numFilenames)
 	for i := range numFilenames {
@@ -133,11 +137,6 @@ func NewIndexFromReader(r io.ReaderAt, closer io.Closer) (*Index, error) {
 		}
 
 		filenames[i] = string(slot[:end])
-	}
-
-	logDir := make([]byte, numLogs*logDirEntrySize)
-	if _, err := readFullAt(r, logDir, off); err != nil {
-		return nil, fmt.Errorf("%w: read log dir: %w", errInvalidIndex, err)
 	}
 
 	return &Index{
