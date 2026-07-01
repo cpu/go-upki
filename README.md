@@ -4,7 +4,8 @@ CRLite revocation checking in Go, backed by an [`upki`][upki] cache.
 
 Integrates the revocation data cache provided by the [`upki`][upki]
 CLI for revocation checking in the Go ecosystem, without requiring 
-`cgo` and linking the `upki` FFI library.
+`cgo` and linking the `upki` FFI library (see
+[rustls/upki-go-demo][rustls-upki-go-demo] for an example of this approach).
 
 Fetching filter data (and creating new filters from revocation
 information) is out-of-scope. Only the 
@@ -52,6 +53,7 @@ checks one certificate against one filter file.
 - [upki-revocation data format specification][upki-revocation].
 
 [upki]: https://github.com/rustls/upki
+[rustls-upki-go-demo]: https://github.com/rustls/upki-go-demo
 [upki-revocation]: https://c2sp.org/upki-revocation@latest
 [vpc]: https://pkg.go.dev/crypto/tls#Config.VerifyPeerCertificate
 [paper]: https://ieeexplore.ieee.org/document/11023370
