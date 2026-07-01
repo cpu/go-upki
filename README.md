@@ -10,6 +10,9 @@ Fetching filter data (and creating new filters from revocation
 information) is out-of-scope. Only the 
 [V4 upki-revocation data format][upki-revocation] is supported.
 
+A place to experiment with API design before proposing a path towards
+built-in stdlib support in `crypto/tls`.
+
 ## `upki` package
 
 The [`upki`](./upki) package answers "is this certificate revoked?"
