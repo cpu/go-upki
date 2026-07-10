@@ -40,14 +40,15 @@ const (
 	// StatusNotCovered means the cache could not determine the
 	// certificate's status. Reasons include: the leaf has no embedded
 	// SCTs, no filter covers any of the SCT (log id, timestamp) pairs,
-	// or a covering filter was found but reported the issuer as not
-	// enrolled.
+	// or covering filters were found but every one reported the issuer
+	// as not enrolled.
 	StatusNotCovered Status = iota
 	// StatusRevoked means a covering filter listed the certificate as
 	// revoked.
 	StatusRevoked
-	// StatusNotRevoked means a covering filter was found and the
-	// certificate is not in its revoked set.
+	// StatusNotRevoked means at least one covering filter answered
+	// conclusively that the certificate is not in its revoked set, and
+	// no covering filter listed it as revoked.
 	StatusNotRevoked
 )
 
@@ -123,6 +124,16 @@ func (c *Checker) Close() error {
 // them. A leaf with malformed SCTs returns [StatusNotCovered] and an
 // error.
 //
+// Several filters may cover the leaf's SCTs, and a filter that can't
+// answer for the leaf's issuer (not enrolled) must not mask another
+// that can. Check therefore queries every covering filter.
+//
+// A revoked answer from any filter wins immediately, a conclusive
+// "not revoked" is remembered but only trusted once no remaining filter
+// revokes, and only if every filter is inconclusive is the result
+// [StatusNotCovered]. Each distinct filter file is opened and parsed
+// at most once per Check call.
+//
 // Note that the signature on the leaf is not re-verified and Check
 // trusts the caller has already done that. This is designed to be used
 // in a context like a [tls.Config.VerifyPeerCertificate] callback
@@ -142,56 +153,73 @@ func (c *Checker) Check(chain []*x509.Certificate) (Status, error) {
 		return StatusNotCovered, nil
 	}
 
-	// Find a filter that covers any of the leaf's SCTs.
-	var (
-		filename string
-		hit      bool
-	)
-	for _, s := range scts {
-		name, found, err := c.idx.Lookup(s.LogID, uint64(s.Timestamp))
-		if err != nil {
-			return StatusNotCovered, fmt.Errorf("upki: index lookup: %w", err)
-		}
-		if found {
-			filename = name
-			hit = true
-			break
-		}
-	}
-	if !hit {
-		return StatusNotCovered, nil
-	}
-
-	filterBytes, err := readFilter(c.opener, filename)
-	if err != nil {
-		return StatusNotCovered, fmt.Errorf("upki: reading filter %s: %w", filename, err)
-	}
-
-	filter, err := crlite.FromBytes(filterBytes)
-	if err != nil {
-		return StatusNotCovered, fmt.Errorf("upki: parsing filter %s: %w", filename, err)
-	}
-
 	serial, err := RawSerial(leaf)
 	if err != nil {
 		return StatusNotCovered, fmt.Errorf("upki: extracting serial: %w", err)
 	}
-	issuerSPKIHash := crlite.IssuerSpkiHash(sha256.Sum256(issuer.RawSubjectPublicKeyInfo))
+	key := crlite.NewKey(sha256.Sum256(issuer.RawSubjectPublicKeyInfo), serial)
 	timestamps := make([]crlite.LogTimestamp, len(scts))
 	for i, s := range scts {
 		timestamps[i] = crlite.LogTimestamp{LogId: s.LogID, Timestamp: s.Timestamp}
 	}
 
-	switch filter.Contains(new(crlite.NewKey(issuerSPKIHash, serial)), timestamps) {
-	case crlite.StatusRevoked:
-		return StatusRevoked, nil
-	case crlite.StatusGood:
-		return StatusNotRevoked, nil
-	default:
-		// StatusNotCovered and StatusNotEnrolled both mean the filter
-		// couldn't answer for this issuer or these timestamps.
-		return StatusNotCovered, nil
+	// Query each filter covering any of the leaf's SCTs, skipping
+	// filters already queried. Contains probes every timestamp, so a
+	// second query of the same filter can't answer differently.
+	notRevoked := false
+	seen := make(map[string]bool)
+	for _, s := range scts {
+		filenames, err := c.idx.Lookup(s.LogID, uint64(s.Timestamp))
+		if err != nil {
+			return StatusNotCovered, fmt.Errorf("upki: index lookup: %w", err)
+		}
+
+		for _, filename := range filenames {
+			if seen[filename] {
+				continue
+			}
+			seen[filename] = true
+
+			status, err := c.queryFilter(filename, &key, timestamps)
+			if err != nil {
+				return StatusNotCovered, err
+			}
+			switch status {
+			case crlite.StatusRevoked:
+				return StatusRevoked, nil
+			case crlite.StatusGood:
+				// Conclusive, but a later filter may still revoke. Remember
+				// the result but keep looking.
+				notRevoked = true
+			default:
+				// StatusNotCovered and StatusNotEnrolled both mean the
+				// filter couldn't answer for this issuer or these
+				// timestamps. Keep looking.
+			}
+		}
 	}
+
+	if notRevoked {
+		return StatusNotRevoked, nil
+	}
+
+	return StatusNotCovered, nil
+}
+
+// queryFilter loads and parses the named filter file, then evaluates
+// the (key, timestamps) membership query against it.
+func (c *Checker) queryFilter(filename string, key *crlite.LookupKey, timestamps []crlite.LogTimestamp) (crlite.Status, error) {
+	filterBytes, err := readFilter(c.opener, filename)
+	if err != nil {
+		return crlite.StatusNotCovered, fmt.Errorf("upki: reading filter %s: %w", filename, err)
+	}
+
+	filter, err := crlite.FromBytes(filterBytes)
+	if err != nil {
+		return crlite.StatusNotCovered, fmt.Errorf("upki: parsing filter %s: %w", filename, err)
+	}
+
+	return filter.Contains(key, timestamps), nil
 }
 
 // IndexReader supplies the bytes of an upki revocation index.bin to

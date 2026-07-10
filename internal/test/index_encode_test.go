@@ -2,6 +2,7 @@ package test_test
 
 import (
 	"bytes"
+	"slices"
 	"testing"
 
 	"github.com/cpu/go-upki/internal"
@@ -10,7 +11,7 @@ import (
 
 // TestIndexRoundTrip covers the main encoding properties: filename table
 // indexing, entries from multiple filters grouped under a shared log,
-// filter-order precedence for overlapping intervals, and misses for
+// filter-list ordering for overlapping intervals, and misses for
 // unknown logs or uncovered timestamps.
 func TestIndexRoundTrip(t *testing.T) {
 	t.Parallel()
@@ -30,31 +31,30 @@ func TestIndexRoundTrip(t *testing.T) {
 	defer idx.Close()
 
 	tests := []struct {
-		name  string
-		log   [32]byte
-		ts    uint64
-		want  string
-		found bool
+		name string
+		log  [32]byte
+		ts   uint64
+		want []string
 	}{
-		{"log A hit", logA, 150, "a.filter", true},
-		{"log B hit first filter", logB, 120, "a.filter", true},
-		{"overlap prefers earlier filter", logB, 180, "a.filter", true},
-		{"log B hit second filter", logB, 250, "b.filter", true},
-		{"log B hit second interval", logB, 1000, "b.filter", true},
-		{"below range", logA, 99, "", false},
-		{"above range", logA, 201, "", false},
-		{"gap between intervals", logB, 400, "", false},
-		{"unknown log", [32]byte{0xff}, 150, "", false},
+		{"log A hit", logA, 150, []string{"a.filter"}},
+		{"log B hit first filter", logB, 120, []string{"a.filter"}},
+		{"overlap lists filters in order", logB, 180, []string{"a.filter", "b.filter"}},
+		{"log B hit second filter", logB, 250, []string{"b.filter"}},
+		{"log B hit second interval", logB, 1000, []string{"b.filter"}},
+		{"below range", logA, 99, nil},
+		{"above range", logA, 201, nil},
+		{"gap between intervals", logB, 400, nil},
+		{"unknown log", [32]byte{0xff}, 150, nil},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			name, found, err := idx.Lookup(tc.log, tc.ts)
+			names, err := idx.Lookup(tc.log, tc.ts)
 			if err != nil {
 				t.Fatalf("Lookup: %v", err)
 			}
-			if found != tc.found || name != tc.want {
-				t.Errorf("Lookup = (%q, %v), want (%q, %v)", name, found, tc.want, tc.found)
+			if !slices.Equal(names, tc.want) {
+				t.Errorf("Lookup = %q, want %q", names, tc.want)
 			}
 		})
 	}
@@ -67,8 +67,8 @@ func TestIndexEmpty(t *testing.T) {
 	idx := parseIndex(t, test.Index{})
 	defer idx.Close()
 
-	if _, found, err := idx.Lookup([32]byte{0xaa}, 150); err != nil || found {
-		t.Errorf("Lookup = (found=%v, err=%v), want a clean miss", found, err)
+	if names, err := idx.Lookup([32]byte{0xaa}, 150); err != nil || len(names) != 0 {
+		t.Errorf("Lookup = (%q, err=%v), want a clean miss", names, err)
 	}
 }
 
