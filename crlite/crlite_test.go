@@ -4,6 +4,8 @@ import (
 	"encoding/base64"
 	"os"
 	"testing"
+
+	"github.com/cpu/go-upki/internal/test"
 )
 
 // TestContains exercises the membership-query path against a known-good
@@ -64,22 +66,17 @@ func TestContains(t *testing.T) {
 }
 
 // TestNotCovered verifies that an SCT log id outside the filter's
-// coverage map produces StatusNotCovered.
+// coverage map produces StatusNotCovered, even for a revoked serial.
 func TestNotCovered(t *testing.T) {
 	t.Parallel()
 
-	filter := loadFilter(t)
+	filter := loadTestFilter(t)
 
-	// Use the real revoked GTS issuer + serial, but with an SCT log id
-	// that won't be in the coverage map.
 	var unknownLog LogId
 	unknownLog[0] = 0xff
 
-	issuer := IssuerSpkiHash(mustDecodeBase64Array32(t, "OdSlmQD9NWJh4EbcOHBxkhygPwNSwA9Q91eounfbcoE="))
-	serial := mustDecodeBase64(t, "APpDYjsNxwPIEFP8ZGvsOiA=")
-	key := NewKey(issuer, serial)
-
-	scts := []LogTimestamp{{LogId: unknownLog, Timestamp: 1782115694514}}
+	key := NewKey(testFilterIssuer, testFilterSerial)
+	scts := []LogTimestamp{{LogId: unknownLog, Timestamp: 150}}
 	if got := filter.Contains(&key, scts); got != StatusNotCovered {
 		t.Errorf("Contains = %v, want StatusNotCovered", got)
 	}
@@ -90,15 +87,12 @@ func TestNotCovered(t *testing.T) {
 func TestNotEnrolled(t *testing.T) {
 	t.Parallel()
 
-	filter := loadFilter(t)
+	filter := loadTestFilter(t)
 
-	var unknownIssuer IssuerSpkiHash // all-zeros, overwhelmingly unlikely in any filter
+	unknownIssuer := IssuerSpkiHash{0xdd}
 	key := NewKey(unknownIssuer, []byte("any-serial"))
 
-	// Reuse a covered SCT (the same log that appeared in TestContains).
-	scts := []LogTimestamp{
-		{LogId: LogId(mustDecodeBase64Array32(t, "1219ENGn9XfCx+lf1wC/+YLJM1pl4dCzAXMXwMjFaXc=")), Timestamp: 1782115694514},
-	}
+	scts := []LogTimestamp{{LogId: testFilterLog, Timestamp: 150}}
 	if got := filter.Contains(&key, scts); got != StatusNotEnrolled {
 		t.Errorf("Contains = %v, want StatusNotEnrolled", got)
 	}
@@ -126,42 +120,58 @@ func TestFromBytesTruncation(t *testing.T) {
 func TestNewestCoverageCutoff(t *testing.T) {
 	t.Parallel()
 
-	filter := loadFilter(t)
-	got := filter.NewestCoverageCutoff()
-	if got == 0 {
-		t.Fatalf("NewestCoverageCutoff = 0, expected non-zero")
-	}
+	filter := loadTestFilter(t)
 
-	// Sanity: should be on the order of a recent CT timestamp (ms since
-	// epoch)
-	if got < 1_700_000_000_000 || got > 1_800_000_000_000 {
-		t.Errorf("NewestCoverageCutoff = %d, expected something near 2026", got)
+	// loadTestFilter covers two logs with cutoffs 200 and 300; the
+	// newest wins.
+	if got := filter.NewestCoverageCutoff(); got != 300 {
+		t.Errorf("NewestCoverageCutoff = %d, want 300", got)
 	}
 }
 
 func TestCoverageCutoffForLog(t *testing.T) {
 	t.Parallel()
 
-	filter := loadFilter(t)
+	filter := loadTestFilter(t)
 
-	// A LogId known to be covered by this filter (pulled from one of the
-	// revoke-test SCTs that successfully reached Revoked status).
-	covered := LogId(mustDecodeBase64Array32(t,
-		"1219ENGn9XfCx+lf1wC/+YLJM1pl4dCzAXMXwMjFaXc="))
-	got, ok := filter.CoverageCutoffForLog(covered)
-	if !ok {
-		t.Fatalf("CoverageCutoffForLog(covered) = (_, false), expected ok=true")
-	}
-	if got == 0 {
-		t.Errorf("CoverageCutoffForLog(covered) = 0, expected non-zero")
+	if got, ok := filter.CoverageCutoffForLog(testFilterLog); !ok || got != 200 {
+		t.Errorf("CoverageCutoffForLog(covered) = (%d, %v), want (200, true)", got, ok)
 	}
 
-	// An all-zeros LogId is overwhelmingly unlikely to appear in the
-	// coverage map.
 	var unknown LogId
 	if got, ok := filter.CoverageCutoffForLog(unknown); ok {
 		t.Errorf("CoverageCutoffForLog(zero) = (%d, true), expected ok=false", got)
 	}
+}
+
+var (
+	testFilterIssuer = IssuerSpkiHash{1, 2, 3}
+	testFilterLog    = LogId{9, 9, 9}
+	testFilterSerial = []byte("revoked-serial")
+)
+
+// loadTestFilter builds and parses a small synthetic filter enrolling
+// testFilterIssuer with testFilterSerial revoked and coverage of two logs.
+func loadTestFilter(t *testing.T) *RevocationFilter {
+	t.Helper()
+
+	f := test.Filter{
+		Issuers: []test.Issuer{{
+			SpkiHash: testFilterIssuer,
+			Revoked:  [][]byte{testFilterSerial},
+		}},
+		Coverage: []test.Coverage{
+			{LogId: testFilterLog, MinTimestamp: 100, MaxTimestamp: 200},
+			{LogId: [32]byte{8, 8, 8}, MinTimestamp: 100, MaxTimestamp: 300},
+		},
+	}
+
+	filter, err := FromBytes(f.Bytes())
+	if err != nil {
+		t.Fatalf("FromBytes: %v", err)
+	}
+
+	return filter
 }
 
 func loadFilter(t *testing.T) *RevocationFilter {

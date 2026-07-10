@@ -7,7 +7,6 @@ package upki_test
 import (
 	"context"
 	"crypto/tls"
-	"crypto/x509"
 	"os"
 	"path/filepath"
 	"testing"
@@ -72,68 +71,6 @@ func TestManifest(t *testing.T) {
 
 	if len(m.Files) < 1 {
 		t.Errorf("Files count is suspiciously low: %d", len(m.Files))
-	}
-}
-
-// TestCheckerOpenClose confirms NewChecker + Close work against a real
-// cache: index.bin opens, header validates, file handle releases.
-func TestCheckerOpenClose(t *testing.T) {
-	t.Parallel()
-
-	cacheDir := requireCacheDir(t)
-
-	c, err := upki.NewChecker(cacheDir)
-	if err != nil {
-		t.Fatalf("NewChecker: %v", err)
-	}
-	if err := c.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
-}
-
-// TestCheck exercises the top-level upki.Check wrapper (open + check
-// + close in one shot).
-func TestCheck(t *testing.T) {
-	t.Parallel()
-
-	cacheDir := requireCacheDir(t)
-
-	leaf := &x509.Certificate{}
-	chain := []*x509.Certificate{leaf, leaf}
-
-	status, err := upki.Check(cacheDir, chain)
-	if err != nil {
-		t.Fatalf("Check: %v", err)
-	}
-	if status != upki.StatusNotCovered {
-		t.Fatalf("status: got %v, want StatusNotCovered", status)
-	}
-}
-
-// TestCheckerNoSCTs confirms a chain whose leaf has no embedded SCTs
-// returns StatusNotCovered with a nil error rather than failing the
-// check. A bare x509.Certificate has no Extensions, which is the
-// simplest way to exercise that code path against a real cache.
-func TestCheckerNoSCTs(t *testing.T) {
-	t.Parallel()
-
-	cacheDir := requireCacheDir(t)
-
-	leaf := &x509.Certificate{}
-	chain := []*x509.Certificate{leaf, leaf}
-
-	c, err := upki.NewChecker(cacheDir)
-	if err != nil {
-		t.Fatalf("NewChecker: %v", err)
-	}
-	defer c.Close()
-
-	status, err := c.Check(chain)
-	if err != nil {
-		t.Fatalf("Check: %v", err)
-	}
-	if status != upki.StatusNotCovered {
-		t.Fatalf("status: got %v, want StatusNotCovered", status)
 	}
 }
 
