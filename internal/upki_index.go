@@ -118,12 +118,18 @@ func NewIndexFromReader(r io.ReaderAt, closer io.Closer) (*Index, error) {
 	numLogs := int(binary.BigEndian.Uint32(header[9:13]))
 
 	// Filename table and log dir are contiguous and their sizes are fully
-	// determined by the header, so fetch both in one ReadAt.
+	// determined by the header, so fetch both in one read. num_log_ids is
+	// an untrusted u32 claiming up to ~180GB of log dir, so read through
+	// io.ReadAll + an io.NewSectionReader rather than trusting the claimed
+	// size for an up-front allocation.
 	filenamesLen := numFilenames * filenameSize
-	logDirLen := numLogs * logDirEntrySize
-	tables := make([]byte, filenamesLen+logDirLen)
-	if _, err := readFullAt(r, tables, int64(headerSize)); err != nil {
+	tablesLen := int64(filenamesLen) + int64(numLogs)*logDirEntrySize
+	tables, err := io.ReadAll(io.NewSectionReader(r, headerSize, tablesLen))
+	if err != nil {
 		return nil, fmt.Errorf("%w: read tables: %w", errInvalidIndex, err)
+	}
+	if int64(len(tables)) != tablesLen {
+		return nil, fmt.Errorf("%w: read tables: %w", errInvalidIndex, io.ErrUnexpectedEOF)
 	}
 	filenamesBuf := tables[:filenamesLen]
 	logDir := tables[filenamesLen:]
