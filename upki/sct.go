@@ -102,7 +102,7 @@ func EmbeddedSCTs(cert *x509.Certificate) ([]SCT, error) {
 // SCT is a parsed Signed Certificate Timestamp from a leaf certificate's
 // embedded SCT extension.
 //
-// It carries the two fields CRLite needs to pick a covering filter: the
+// It carries the two fields CRLite needs to pick covering filters: the
 // CT log's identifier and the log's reported issuance timestamp.
 //
 // Important: The SCT's signature is intentionally not retained.

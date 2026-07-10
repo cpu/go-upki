@@ -152,39 +152,271 @@ func TestCheckerCheck(t *testing.T) {
 	}
 }
 
-// TestCheckerCheckMalformedSerial confirms Check surfaces a RawSerial
-// failure: the leaf carries a parseable SCT extension covered by the
-// cache's filter, but garbage in RawTBSCertificate, so the serial
-// cannot be extracted.
-func TestCheckerCheckMalformedSerial(t *testing.T) {
+// TestCheckerCheckAggregation exercises Check's handling of multiple
+// covering filters.
+//
+// A filter that can't answer for the leaf's issuer (not enrolled) must
+// not mask another filter that can, a conclusive "not revoked" must not
+// mask a later revocation, and a revoked answer short-circuits without
+// reading the remaining filters.
+func TestCheckerCheckAggregation(t *testing.T) {
 	t.Parallel()
 
-	coveredLog := fillLogID(0x11)
+	logA, logB := fillLogID(0x11), fillLogID(0x22)
+	issuer := newTestCert(t, nil, nil)
+	otherIssuer := newTestCert(t, nil, nil)
+	issuerHash := sha256.Sum256(issuer.RawSubjectPublicKeyInfo)
+	otherHash := sha256.Sum256(otherIssuer.RawSubjectPublicKeyInfo)
+
+	covA := test.Coverage{LogId: logA, MinTimestamp: 0, MaxTimestamp: 2000}
+	covB := test.Coverage{LogId: logB, MinTimestamp: 0, MaxTimestamp: 2000}
+	// An interval for log A that misses the SCT timestamps used below.
+	covALate := test.Coverage{LogId: logA, MinTimestamp: 2000, MaxTimestamp: 3000}
+
+	// enrolled builds a filter that can answer for issuer: serial 42 is
+	// revoked, serial 43 is not.
+	enrolled := func(cov ...test.Coverage) []byte {
+		return test.Filter{
+			Issuers: []test.Issuer{{
+				SpkiHash:   issuerHash,
+				Revoked:    [][]byte{{42}},
+				NotRevoked: [][]byte{{43}},
+			}},
+			Coverage: cov,
+		}.Bytes()
+	}
+	// notEnrolled builds a filter that enrolls only otherIssuer, so it
+	// is inconclusive for chains issued by issuer.
+	notEnrolled := func(cov ...test.Coverage) []byte {
+		return test.Filter{
+			Issuers:  []test.Issuer{{SpkiHash: otherHash, Revoked: [][]byte{{7}}}},
+			Coverage: cov,
+		}.Bytes()
+	}
+	// goodFor42 builds a filter that conclusively answers "not revoked"
+	// for serial 42.
+	goodFor42 := func(cov ...test.Coverage) []byte {
+		return test.Filter{
+			Issuers: []test.Issuer{{
+				SpkiHash:   issuerHash,
+				Revoked:    [][]byte{{9}},
+				NotRevoked: [][]byte{{42}},
+			}},
+			Coverage: cov,
+		}.Bytes()
+	}
+
+	tests := []struct {
+		name   string
+		idx    test.Index
+		files  map[string][]byte
+		serial int64
+		scts   []SCT
+		want   Status
+	}{
+		{
+			// The filter covering the first SCT can't answer for our
+			// issuer and the verdict comes from the second SCT's filter.
+			name: "continues past not enrolled to revoked",
+			idx: test.Index{Filters: []test.IndexFilter{
+				{Filename: "f0.filter", Coverage: []test.Coverage{covA}},
+				{Filename: "f1.filter", Coverage: []test.Coverage{covB}},
+			}},
+			files:  map[string][]byte{"f0.filter": notEnrolled(covA), "f1.filter": enrolled(covB)},
+			serial: 42,
+			scts:   []SCT{{LogID: logA, Timestamp: 1000}, {LogID: logB, Timestamp: 1000}},
+			want:   StatusRevoked,
+		},
+		{
+			name: "continues past not enrolled to not revoked",
+			idx: test.Index{Filters: []test.IndexFilter{
+				{Filename: "f0.filter", Coverage: []test.Coverage{covA}},
+				{Filename: "f1.filter", Coverage: []test.Coverage{covB}},
+			}},
+			files:  map[string][]byte{"f0.filter": notEnrolled(covA), "f1.filter": enrolled(covB)},
+			serial: 43,
+			scts:   []SCT{{LogID: logA, Timestamp: 1000}, {LogID: logB, Timestamp: 1000}},
+			want:   StatusNotRevoked,
+		},
+		{
+			// Every covering filter is inconclusive, so the cache can't
+			// determine the certificate's status.
+			name: "all covering filters not enrolled",
+			idx: test.Index{Filters: []test.IndexFilter{
+				{Filename: "f0.filter", Coverage: []test.Coverage{covA}},
+				{Filename: "f1.filter", Coverage: []test.Coverage{covB}},
+			}},
+			files:  map[string][]byte{"f0.filter": notEnrolled(covA), "f1.filter": notEnrolled(covB)},
+			serial: 42,
+			scts:   []SCT{{LogID: logA, Timestamp: 1000}, {LogID: logB, Timestamp: 1000}},
+			want:   StatusNotCovered,
+		},
+		{
+			// A revoked verdict short-circuits: f1's file is absent from
+			// disk, so Check would error if it read past the verdict.
+			name: "revoked stops before later filters",
+			idx: test.Index{Filters: []test.IndexFilter{
+				{Filename: "f0.filter", Coverage: []test.Coverage{covA}},
+				{Filename: "f1.filter", Coverage: []test.Coverage{covB}},
+			}},
+			files:  map[string][]byte{"f0.filter": enrolled(covA)},
+			serial: 42,
+			scts:   []SCT{{LogID: logA, Timestamp: 1000}, {LogID: logB, Timestamp: 1000}},
+			want:   StatusRevoked,
+		},
+		{
+			// A "not revoked" answer must not short-circuit: a later
+			// covering filter revokes the certificate and revocation wins.
+			name: "not revoked does not stop the check",
+			idx: test.Index{Filters: []test.IndexFilter{
+				{Filename: "f0.filter", Coverage: []test.Coverage{covA}},
+				{Filename: "f1.filter", Coverage: []test.Coverage{covB}},
+			}},
+			files:  map[string][]byte{"f0.filter": goodFor42(covA), "f1.filter": enrolled(covB)},
+			serial: 42,
+			scts:   []SCT{{LogID: logA, Timestamp: 1000}, {LogID: logB, Timestamp: 1000}},
+			want:   StatusRevoked,
+		},
+		{
+			// One log, two covering filters: the verdict comes from the
+			// second even though the first is inconclusive.
+			name: "second filter for the same log revokes",
+			idx: test.Index{Filters: []test.IndexFilter{
+				{Filename: "f0.filter", Coverage: []test.Coverage{covA}},
+				{Filename: "f1.filter", Coverage: []test.Coverage{covA}},
+			}},
+			files:  map[string][]byte{"f0.filter": notEnrolled(covA), "f1.filter": enrolled(covA)},
+			serial: 42,
+			scts:   []SCT{{LogID: logA, Timestamp: 1000}},
+			want:   StatusRevoked,
+		},
+		{
+			name: "second filter for the same log answers not revoked",
+			idx: test.Index{Filters: []test.IndexFilter{
+				{Filename: "f0.filter", Coverage: []test.Coverage{covA}},
+				{Filename: "f1.filter", Coverage: []test.Coverage{covA}},
+			}},
+			files:  map[string][]byte{"f0.filter": notEnrolled(covA), "f1.filter": enrolled(covA)},
+			serial: 43,
+			scts:   []SCT{{LogID: logA, Timestamp: 1000}},
+			want:   StatusNotRevoked,
+		},
+		{
+			// An entry whose interval misses the SCT is skipped without
+			// reading its filter (f0's file is absent), and the scan
+			// continues to the covering entry for the same log.
+			name: "non-matching interval skipped without load",
+			idx: test.Index{Filters: []test.IndexFilter{
+				{Filename: "f0.filter", Coverage: []test.Coverage{covALate}},
+				{Filename: "f1.filter", Coverage: []test.Coverage{covA}},
+			}},
+			files:  map[string][]byte{"f1.filter": enrolled(covA)},
+			serial: 42,
+			scts:   []SCT{{LogID: logA, Timestamp: 1000}},
+			want:   StatusRevoked,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			c, err := NewChecker(writeTestCache(t, tc.idx, tc.files))
+			if err != nil {
+				t.Fatalf("NewChecker: %v", err)
+			}
+			defer c.Close()
+
+			ext := buildSCTExtension(t, tc.scts)
+			chain := []*x509.Certificate{newTestCert(t, big.NewInt(tc.serial), ext), issuer}
+			status, err := c.Check(chain)
+			if err != nil {
+				t.Fatalf("Check: %v", err)
+			}
+			if status != tc.want {
+				t.Errorf("Check = %v, want %v", status, tc.want)
+			}
+		})
+	}
+}
+
+// TestCheckerCheckFilterLoadedOnce confirms Check reads a filter file at
+// most once, even when it covers several of the leaf's SCTs.
+func TestCheckerCheckFilterLoadedOnce(t *testing.T) {
+	t.Parallel()
+
+	logA, logB := fillLogID(0x11), fillLogID(0x22)
 	issuer := newTestCert(t, nil, nil)
 	issuerHash := sha256.Sum256(issuer.RawSubjectPublicKeyInfo)
 
-	coverage := []test.Coverage{{LogId: coveredLog, MinTimestamp: 500, MaxTimestamp: 1500}}
+	coverage := []test.Coverage{
+		{LogId: logA, MinTimestamp: 0, MaxTimestamp: 2000},
+		{LogId: logB, MinTimestamp: 0, MaxTimestamp: 2000},
+	}
 	filterBytes := test.Filter{
-		Issuers:  []test.Issuer{{SpkiHash: issuerHash, Revoked: [][]byte{{42}}}},
+		Issuers:  []test.Issuer{{SpkiHash: issuerHash, Revoked: [][]byte{{41}}, NotRevoked: [][]byte{{42}}}},
 		Coverage: coverage,
 	}.Bytes()
-	cacheDir := writeTestCache(t,
-		test.Index{Filters: []test.IndexFilter{{Filename: "t.filter", Coverage: coverage}}},
-		map[string][]byte{"t.filter": filterBytes},
-	)
+	idx := test.Index{Filters: []test.IndexFilter{{Filename: "shared.filter", Coverage: coverage}}}
 
-	c, err := NewChecker(cacheDir)
+	opener := &countingOpener{files: map[string][]byte{"shared.filter": filterBytes}, opens: map[string]int{}}
+	c, err := NewCheckerWith(readerAtNopCloser{bytes.NewReader(idx.Bytes())}, opener)
+	if err != nil {
+		t.Fatalf("NewCheckerWith: %v", err)
+	}
+	defer c.Close()
+
+	// Both SCTs resolve to shared.filter, and it answers "not revoked" for
+	// the first, so a second (redundant) load would go unnoticed without
+	// counting opens.
+	ext := buildSCTExtension(t, []SCT{{LogID: logA, Timestamp: 1000}, {LogID: logB, Timestamp: 1000}})
+	chain := []*x509.Certificate{newTestCert(t, big.NewInt(42), ext), issuer}
+	status, err := c.Check(chain)
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if status != StatusNotRevoked {
+		t.Errorf("Check = %v, want StatusNotRevoked", status)
+	}
+	if got := opener.opens["shared.filter"]; got != 1 {
+		t.Errorf("shared.filter opened %d times, want 1", got)
+	}
+}
+
+// countingOpener is an in-memory FilterOpener that records how many
+// times each filename is opened.
+type countingOpener struct {
+	files map[string][]byte
+	opens map[string]int
+}
+
+func (o *countingOpener) Open(filename string) (io.ReadCloser, error) {
+	o.opens[filename]++
+	data, ok := o.files[filename]
+	if !ok {
+		return nil, os.ErrNotExist
+	}
+
+	return io.NopCloser(bytes.NewReader(data)), nil
+}
+
+// TestCheckerCheckMalformedSerial confirms Check surfaces a RawSerial
+// failure: the leaf carries a parseable SCT extension but garbage in
+// RawTBSCertificate, so the serial cannot be extracted.
+func TestCheckerCheckMalformedSerial(t *testing.T) {
+	t.Parallel()
+
+	c, err := NewChecker(writeTestCache(t, test.Index{}, nil))
 	if err != nil {
 		t.Fatalf("NewChecker: %v", err)
 	}
 	defer c.Close()
 
-	ext := buildSCTExtension(t, []SCT{{LogID: coveredLog, Timestamp: 1000}})
+	ext := buildSCTExtension(t, []SCT{{LogID: fillLogID(0x11), Timestamp: 1000}})
 	leaf := &x509.Certificate{
 		Extensions:        []pkix.Extension{*ext},
 		RawTBSCertificate: []byte{0xde, 0xad, 0xbe, 0xef},
 	}
-	status, err := c.Check([]*x509.Certificate{leaf, issuer})
+	status, err := c.Check([]*x509.Certificate{leaf, newTestCert(t, nil, nil)})
 	if !errors.Is(err, ErrMalformedTBSCertificate) {
 		t.Fatalf("Check error = %v, want ErrMalformedTBSCertificate", err)
 	}

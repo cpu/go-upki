@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -25,12 +26,12 @@ func TestLookupEmptyIndex(t *testing.T) {
 	defer idx.Close()
 
 	id, ts := testInput()
-	_, found, err := idx.Lookup(id, ts)
+	names, err := idx.Lookup(id, ts)
 	if err != nil {
 		t.Fatalf("Lookup: %v", err)
 	}
-	if found {
-		t.Fatal("expected not found on empty index")
+	if len(names) != 0 {
+		t.Fatalf("expected no filters on empty index, got %q", names)
 	}
 }
 
@@ -55,12 +56,12 @@ func TestLookupNoMatchingLogID(t *testing.T) {
 	defer idx.Close()
 
 	id, ts := testInput()
-	_, found, err := idx.Lookup(id, ts)
+	names, err := idx.Lookup(id, ts)
 	if err != nil {
 		t.Fatalf("Lookup: %v", err)
 	}
-	if found {
-		t.Fatal("expected not found when log id absent")
+	if len(names) != 0 {
+		t.Fatalf("expected no filters when log id absent, got %q", names)
 	}
 }
 
@@ -85,12 +86,12 @@ func TestLookupNoMatchingTimestamp(t *testing.T) {
 	defer idx.Close()
 
 	id, ts := testInput()
-	_, found, err := idx.Lookup(id, ts)
+	names, err := idx.Lookup(id, ts)
 	if err != nil {
 		t.Fatalf("Lookup: %v", err)
 	}
-	if found {
-		t.Fatal("expected not found when timestamp outside interval")
+	if len(names) != 0 {
+		t.Fatalf("expected no filters when timestamp outside interval, got %q", names)
 	}
 }
 
@@ -122,15 +123,51 @@ func TestLookupHit(t *testing.T) {
 	defer idx.Close()
 
 	id, ts := testInput()
-	name, found, err := idx.Lookup(id, ts)
+	names, err := idx.Lookup(id, ts)
 	if err != nil {
 		t.Fatalf("Lookup: %v", err)
 	}
-	if !found {
-		t.Fatal("expected hit for log B at ts=1000")
+	if want := []string{"filter-b.filter"}; !slices.Equal(names, want) {
+		t.Fatalf("filenames: got %q, want %q", names, want)
 	}
-	if name != "filter-b.filter" {
-		t.Fatalf("filename: got %q, want %q", name, "filter-b.filter")
+}
+
+// TestLookupMultipleFilters confirms Lookup returns every filter whose
+// interval covers the timestamp, in entry order, skipping non-matching
+// intervals without abandoning the rest of the log's entries.
+func TestLookupMultipleFilters(t *testing.T) {
+	t.Parallel()
+
+	id, ts := testInput()
+	idxFile := test.Index{Filters: []test.IndexFilter{
+		// Covers the probe.
+		{Filename: "filter-a.filter", Coverage: []test.Coverage{
+			{LogId: id, MinTimestamp: 500, MaxTimestamp: 1500},
+		}},
+		// Same log, interval misses the probe: skipped, but must not
+		// stop the scan.
+		{Filename: "filter-b.filter", Coverage: []test.Coverage{
+			{LogId: id, MinTimestamp: 2000, MaxTimestamp: 3000},
+		}},
+		// Same log, overlapping interval also covering the probe.
+		{Filename: "filter-c.filter", Coverage: []test.Coverage{
+			{LogId: id, MinTimestamp: 0, MaxTimestamp: 2000},
+		}},
+	}}
+	cacheDir := writeCacheIndex(t, idxFile.Bytes())
+
+	idx, err := NewIndex(cacheDir)
+	if err != nil {
+		t.Fatalf("NewIndex: %v", err)
+	}
+	defer idx.Close()
+
+	names, err := idx.Lookup(id, ts)
+	if err != nil {
+		t.Fatalf("Lookup: %v", err)
+	}
+	if want := []string{"filter-a.filter", "filter-c.filter"}; !slices.Equal(names, want) {
+		t.Fatalf("filenames: got %q, want %q", names, want)
 	}
 }
 
@@ -156,15 +193,12 @@ func TestNewIndexFromReader(t *testing.T) {
 	defer idx.Close()
 
 	id, ts := testInput()
-	name, found, err := idx.Lookup(id, ts)
+	names, err := idx.Lookup(id, ts)
 	if err != nil {
 		t.Fatalf("Lookup: %v", err)
 	}
-	if !found {
-		t.Fatal("expected hit")
-	}
-	if name != "filter.filter" {
-		t.Fatalf("filename: got %q, want %q", name, "filter.filter")
+	if want := []string{"filter.filter"}; !slices.Equal(names, want) {
+		t.Fatalf("filenames: got %q, want %q", names, want)
 	}
 }
 
@@ -206,18 +240,14 @@ func TestLookupConcurrent(t *testing.T) {
 			defer wg.Done()
 			for i := range perWorker {
 				id := logs[(w+i)%len(logs)]
-				name, found, err := idx.Lookup(id, 1000)
+				names, err := idx.Lookup(id, 1000)
 				if err != nil {
 					errs <- fmt.Errorf("worker %d: %v", w, err)
 					return
 				}
-				if !found {
-					errs <- fmt.Errorf("worker %d: expected hit", w)
-					return
-				}
-				want := fmt.Sprintf("filter-%d.filter", (w+i)%len(logs))
-				if name != want {
-					errs <- fmt.Errorf("worker %d: got %q, want %q", w, name, want)
+				want := []string{fmt.Sprintf("filter-%d.filter", (w+i)%len(logs))}
+				if !slices.Equal(names, want) {
+					errs <- fmt.Errorf("worker %d: got %q, want %q", w, names, want)
 					return
 				}
 			}
@@ -253,7 +283,7 @@ func TestLookupCorruptEntries(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NewIndexFromReader: %v", err)
 		}
-		if _, _, err := idx.Lookup(id, ts); !errors.Is(err, errInvalidIndex) {
+		if _, err := idx.Lookup(id, ts); !errors.Is(err, errInvalidIndex) {
 			t.Fatalf("want errInvalidIndex, got %v", err)
 		}
 	})
@@ -268,7 +298,7 @@ func TestLookupCorruptEntries(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NewIndexFromReader: %v", err)
 		}
-		if _, _, err := idx.Lookup(id, ts); !errors.Is(err, errInvalidIndex) {
+		if _, err := idx.Lookup(id, ts); !errors.Is(err, errInvalidIndex) {
 			t.Fatalf("want errInvalidIndex, got %v", err)
 		}
 	})
@@ -316,12 +346,12 @@ func TestFilenameFillsSlot(t *testing.T) {
 	}
 	defer idx.Close()
 
-	got, found, err := idx.Lookup(id, ts)
+	names, err := idx.Lookup(id, ts)
 	if err != nil {
 		t.Fatalf("Lookup: %v", err)
 	}
-	if !found || got != name {
-		t.Fatalf("Lookup = (%q, %v), want (%q, true)", got, found, name)
+	if want := []string{name}; !slices.Equal(names, want) {
+		t.Fatalf("filenames: got %q, want %q", names, want)
 	}
 }
 
@@ -349,12 +379,12 @@ func TestReaderAtContractVariants(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NewIndexFromReader: %v", err)
 		}
-		name, found, err := idx.Lookup(id, ts)
+		names, err := idx.Lookup(id, ts)
 		if err != nil {
 			t.Fatalf("Lookup: %v", err)
 		}
-		if !found || name != "test.filter" {
-			t.Fatalf("Lookup = (%q, %v), want (%q, true)", name, found, "test.filter")
+		if want := []string{"test.filter"}; !slices.Equal(names, want) {
+			t.Fatalf("filenames: got %q, want %q", names, want)
 		}
 	})
 

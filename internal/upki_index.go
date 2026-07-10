@@ -163,26 +163,28 @@ func (idx *Index) Close() error {
 	return err
 }
 
-// Lookup finds the filter file that covers the given CT log id at the
-// given timestamp, returning the covering filter's basename.
+// Lookup finds the filter files that cover the given CT log id at the
+// given timestamp, returning the covering filters' basenames in index
+// entry order.
 //
 // It binary-searches the in-memory log-id directory and on a hit issues
-// a single [io.ReaderAt.ReadAt] against that log's entry section. It
-// then scans for an interval [min, max] containing timestamp, and the
-// first match wins.
+// a single [io.ReaderAt.ReadAt] against that log's entry section. Every
+// entry whose interval [min, max] contains timestamp contributes its
+// filter. A log can have several covering filters for the same instant
+// and a conclusive revocation answer may come from any of them, so
+// callers must consult all the returned filters, not just the first.
 //
-// The second return is false (with an empty filename and nil error) when
-// no entry covers the (log id, timestamp). In this case the log is not
-// indexed, or it is indexed but the timestamp falls outside every
-// recorded interval.
+// The result is empty (with a nil error) when no entry covers the
+// (log id, timestamp). In this case the log is not indexed, or it is
+// indexed but the timestamp falls outside every recorded interval.
 //
 // logID and timestamp are raw [32]byte / uint64 rather than crlite.LogId /
 // crlite.Timestamp so this package can stay free of a crlite import; crlite
 // already depends on internal, and a back-edge would form an import cycle.
-func (idx *Index) Lookup(logID [32]byte, timestamp uint64) (string, bool, error) {
+func (idx *Index) Lookup(logID [32]byte, timestamp uint64) ([]string, error) {
 	dirOffset, ok := idx.findLog(logID)
 	if !ok {
-		return "", false, nil
+		return nil, nil
 	}
 
 	// log-dir entry is: log_id[32] | entry_offset(u64) | count(u16).
@@ -191,25 +193,28 @@ func (idx *Index) Lookup(logID [32]byte, timestamp uint64) (string, bool, error)
 
 	buf := make([]byte, int(count)*entrySize)
 	if _, err := readFullAt(idx.r, buf, int64(entryOffset)); err != nil {
-		return "", false, fmt.Errorf("%w: read entries: %w", errInvalidIndex, err)
+		return nil, fmt.Errorf("%w: read entries: %w", errInvalidIndex, err)
 	}
 
+	var filenames []string
 	for i := range int(count) {
 		// entry is: filter_idx(u8) | min_ts(u64) | max_ts(u64).
 		off := i * entrySize
 		filterIdx := int(buf[off])
 		minTS := binary.BigEndian.Uint64(buf[off+1 : off+9])
 		maxTS := binary.BigEndian.Uint64(buf[off+9 : off+17])
-		if minTS <= timestamp && timestamp <= maxTS {
-			if filterIdx >= len(idx.filenames) {
-				return "", false, fmt.Errorf("%w: entry filter index %d out of range", errInvalidIndex, filterIdx)
-			}
-
-			return idx.filenames[filterIdx], true, nil
+		if minTS > timestamp || timestamp > maxTS {
+			continue
 		}
+
+		if filterIdx >= len(idx.filenames) {
+			return nil, fmt.Errorf("%w: entry filter index %d out of range", errInvalidIndex, filterIdx)
+		}
+
+		filenames = append(filenames, idx.filenames[filterIdx])
 	}
 
-	return "", false, nil
+	return filenames, nil
 }
 
 // findLog binary-searches the lexicographically-sorted log-id directory

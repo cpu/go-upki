@@ -24,7 +24,7 @@ type IndexFilter struct {
 	Filename string
 	// Coverage lists the (log, timestamp range) intervals this filter
 	// covers. Entries for a shared log keep filter-list order, so when
-	// intervals overlap the earlier filter wins lookups.
+	// intervals overlap lookups return the earlier filter first.
 	Coverage []Coverage
 }
 
