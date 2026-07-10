@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -229,6 +231,49 @@ func TestLookupConcurrent(t *testing.T) {
 	}
 }
 
+// TestLookupCorruptEntries covers Lookup's error paths: an entry section
+// that can't be fully read, and an entry whose filter index exceeds the
+// filename table.
+func TestLookupCorruptEntries(t *testing.T) {
+	t.Parallel()
+
+	id, ts := testInput()
+	enc := test.Index{Filters: []test.IndexFilter{
+		{Filename: "test.filter", Coverage: []test.Coverage{
+			{LogId: id, MinTimestamp: 500, MaxTimestamp: 1500},
+		}},
+	}}.Bytes()
+
+	t.Run("truncated entry section", func(t *testing.T) {
+		t.Parallel()
+
+		// Chop into the trailing 17-byte entry: header and tables still
+		// parse, but reading the entry section comes up short.
+		idx, err := NewIndexFromReader(bytes.NewReader(enc[:len(enc)-5]), nil)
+		if err != nil {
+			t.Fatalf("NewIndexFromReader: %v", err)
+		}
+		if _, _, err := idx.Lookup(id, ts); !errors.Is(err, errInvalidIndex) {
+			t.Fatalf("want errInvalidIndex, got %v", err)
+		}
+	})
+
+	t.Run("filter index out of range", func(t *testing.T) {
+		t.Parallel()
+
+		// The entry's filter_idx byte leads the trailing 17-byte entry.
+		bad := bytes.Clone(enc)
+		bad[len(bad)-17] = 0xff
+		idx, err := NewIndexFromReader(bytes.NewReader(bad), nil)
+		if err != nil {
+			t.Fatalf("NewIndexFromReader: %v", err)
+		}
+		if _, _, err := idx.Lookup(id, ts); !errors.Is(err, errInvalidIndex) {
+			t.Fatalf("want errInvalidIndex, got %v", err)
+		}
+	})
+}
+
 // testInput returns the canonical (log id, timestamp) probe used by the
 // Lookup tests; suites place coverage intervals around or outside this
 // pair to exercise the hit and miss paths.
@@ -239,6 +284,111 @@ func testInput() ([32]byte, uint64) {
 	}
 
 	return id, 1000
+}
+
+// TestTruncatedTables covers the tables-read error path: the header
+// parses and claims a filename table the file doesn't contain.
+func TestTruncatedTables(t *testing.T) {
+	t.Parallel()
+
+	// magic | num_filenames=1 | num_log_ids=0, then EOF.
+	data := append([]byte(indexMagic), 1, 0, 0, 0, 0)
+	_, err := NewIndexFromReader(bytes.NewReader(data), nil)
+	if !errors.Is(err, errInvalidIndex) {
+		t.Fatalf("want errInvalidIndex, got %v", err)
+	}
+}
+
+// TestFilenameFillsSlot confirms a filename occupying its full 32-byte
+// slot (so no NUL padding follows it) round-trips through Lookup.
+func TestFilenameFillsSlot(t *testing.T) {
+	t.Parallel()
+
+	id, ts := testInput()
+	name := strings.Repeat("f", filenameSize-len(".filter")) + ".filter"
+	idx, err := NewIndexFromReader(bytes.NewReader(test.Index{Filters: []test.IndexFilter{
+		{Filename: name, Coverage: []test.Coverage{
+			{LogId: id, MinTimestamp: 500, MaxTimestamp: 1500},
+		}},
+	}}.Bytes()), nil)
+	if err != nil {
+		t.Fatalf("NewIndexFromReader: %v", err)
+	}
+	defer idx.Close()
+
+	got, found, err := idx.Lookup(id, ts)
+	if err != nil {
+		t.Fatalf("Lookup: %v", err)
+	}
+	if !found || got != name {
+		t.Fatalf("Lookup = (%q, %v), want (%q, true)", got, found, name)
+	}
+}
+
+// TestReaderAtContractVariants exercises the io.ReaderAt behaviors the
+// index must tolerate from custom backends: a reader that reports
+// io.EOF alongside a full read ending exactly at EOF (permitted by the
+// contract, and common for e.g. HTTP range backends), and one that
+// misbehaves by returning a short read with a nil error.
+func TestReaderAtContractVariants(t *testing.T) {
+	t.Parallel()
+
+	id, ts := testInput()
+	enc := test.Index{Filters: []test.IndexFilter{
+		{Filename: "test.filter", Coverage: []test.Coverage{
+			{LogId: id, MinTimestamp: 500, MaxTimestamp: 1500},
+		}},
+	}}.Bytes()
+
+	t.Run("eof on exact final read", func(t *testing.T) {
+		t.Parallel()
+
+		// The entry section is the file's final bytes, so Lookup's read
+		// ends exactly at EOF and must tolerate (n, io.EOF).
+		idx, err := NewIndexFromReader(eofReaderAt{bytes.NewReader(enc)}, nil)
+		if err != nil {
+			t.Fatalf("NewIndexFromReader: %v", err)
+		}
+		name, found, err := idx.Lookup(id, ts)
+		if err != nil {
+			t.Fatalf("Lookup: %v", err)
+		}
+		if !found || name != "test.filter" {
+			t.Fatalf("Lookup = (%q, %v), want (%q, true)", name, found, "test.filter")
+		}
+	})
+
+	t.Run("short read with nil error", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := NewIndexFromReader(shortReaderAt{bytes.NewReader(enc)}, nil)
+		if !errors.Is(err, errInvalidIndex) {
+			t.Fatalf("want errInvalidIndex, got %v", err)
+		}
+	})
+}
+
+// eofReaderAt converts a full read ending exactly at EOF into
+// (n, io.EOF), which the io.ReaderAt contract permits.
+type eofReaderAt struct{ r *bytes.Reader }
+
+func (e eofReaderAt) ReadAt(p []byte, off int64) (int, error) {
+	n, err := e.r.ReadAt(p, off)
+	if err == nil && off+int64(n) == e.r.Size() {
+		return n, io.EOF
+	}
+
+	return n, err
+}
+
+// shortReaderAt violates the io.ReaderAt contract by returning fewer
+// bytes than requested with a nil error.
+type shortReaderAt struct{ r *bytes.Reader }
+
+func (s shortReaderAt) ReadAt(p []byte, off int64) (int, error) {
+	n, _ := s.r.ReadAt(p[:len(p)-1], off)
+
+	return n, nil
 }
 
 func TestInvalidMagic(t *testing.T) {
