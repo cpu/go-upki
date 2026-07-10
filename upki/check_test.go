@@ -7,6 +7,9 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/cpu/go-upki/internal"
+	"github.com/cpu/go-upki/internal/test"
 )
 
 func TestCheckChainTooShort(t *testing.T) {
@@ -24,6 +27,79 @@ func TestCheckChainTooShort(t *testing.T) {
 			t.Errorf("case %d: want ErrChainTooShort, got %v", i, err)
 		}
 	}
+}
+
+// TestCheckerOpenClose confirms NewChecker + Close work against a cache
+// dir: index.bin opens, header validates, file handle releases.
+func TestCheckerOpenClose(t *testing.T) {
+	t.Parallel()
+
+	c, err := NewChecker(writeTestCache(t, test.Index{}))
+	if err != nil {
+		t.Fatalf("NewChecker: %v", err)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+}
+
+// TestCheck exercises the top-level upki.Check wrapper (open + check
+// + close in one shot).
+func TestCheck(t *testing.T) {
+	t.Parallel()
+
+	leaf := &x509.Certificate{}
+	chain := []*x509.Certificate{leaf, leaf}
+
+	status, err := Check(writeTestCache(t, test.Index{}), chain)
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if status != StatusNotCovered {
+		t.Fatalf("status: got %v, want StatusNotCovered", status)
+	}
+}
+
+// TestCheckerNoSCTs confirms a chain whose leaf has no embedded SCTs
+// returns StatusNotCovered with a nil error rather than failing the
+// check. A bare x509.Certificate has no Extensions, which is the
+// simplest way to exercise that code path.
+func TestCheckerNoSCTs(t *testing.T) {
+	t.Parallel()
+
+	leaf := &x509.Certificate{}
+	chain := []*x509.Certificate{leaf, leaf}
+
+	c, err := NewChecker(writeTestCache(t, test.Index{}))
+	if err != nil {
+		t.Fatalf("NewChecker: %v", err)
+	}
+	defer c.Close()
+
+	status, err := c.Check(chain)
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if status != StatusNotCovered {
+		t.Fatalf("status: got %v, want StatusNotCovered", status)
+	}
+}
+
+// writeTestCache lays out a temp upki cache dir holding idx as its
+// revocation index.bin.
+func writeTestCache(t *testing.T, idx test.Index) string {
+	t.Helper()
+
+	cacheDir := t.TempDir()
+	revDir := filepath.Join(cacheDir, internal.RevocationSubdir)
+	if err := os.MkdirAll(revDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(revDir, "index.bin"), idx.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	return cacheDir
 }
 
 func TestDirOpener(t *testing.T) {
