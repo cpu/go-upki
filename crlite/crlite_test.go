@@ -2,6 +2,7 @@ package crlite
 
 import (
 	"encoding/base64"
+	"errors"
 	"os"
 	"testing"
 
@@ -141,6 +142,41 @@ func TestCoverageCutoffForLog(t *testing.T) {
 	var unknown LogId
 	if got, ok := filter.CoverageCutoffForLog(unknown); ok {
 		t.Errorf("CoverageCutoffForLog(zero) = (%d, true), expected ok=false", got)
+	}
+}
+
+// TestFromBytesUnsupportedVersion verifies a non-V4 version tag is
+// rejected with ErrUnsupportedFormat.
+func TestFromBytesUnsupportedVersion(t *testing.T) {
+	t.Parallel()
+
+	enc := test.Filter{}.Bytes()
+	enc[0] = 5
+	if _, err := FromBytes(enc); !errors.Is(err, ErrUnsupportedFormat) {
+		t.Fatalf("want ErrUnsupportedFormat, got %v", err)
+	}
+}
+
+// TestFromBytesTrailingData verifies bytes past a well-formed filter are
+// rejected with ErrDeserialize.
+func TestFromBytesTrailingData(t *testing.T) {
+	t.Parallel()
+
+	enc := append(test.Filter{}.Bytes(), 0x00)
+	if _, err := FromBytes(enc); !errors.Is(err, ErrDeserialize) {
+		t.Fatalf("want ErrDeserialize, got %v", err)
+	}
+}
+
+// TestFromBytesDuplicateBlock verifies two index entries sharing a block
+// id are rejected with ErrDeserialize.
+func TestFromBytesDuplicateBlock(t *testing.T) {
+	t.Parallel()
+
+	dup := test.Issuer{SpkiHash: testFilterIssuer, Revoked: [][]byte{testFilterSerial}}
+	enc := test.Filter{Issuers: []test.Issuer{dup, dup}}.Bytes()
+	if _, err := FromBytes(enc); !errors.Is(err, ErrDeserialize) {
+		t.Fatalf("want ErrDeserialize, got %v", err)
 	}
 }
 
