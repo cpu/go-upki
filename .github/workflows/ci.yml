@@ -84,6 +84,42 @@ jobs:
       - name: Run go vet
         run: go vet ./...
 
+  fuzz:
+    # Native Go fuzzing of the untrusted-input deserializers, time-boxed so
+    # the job stays fast. Seed corpora also run as regular tests in the
+    # `test` job; this job additionally explores new inputs. New failing
+    # inputs are written to testdata/fuzz/ and uploaded as an artifact for
+    # reproduction.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Fuzz clubcard filter deserialization
+        run: go test -run='^FuzzFromBytes$' -fuzz='^FuzzFromBytes$' -fuzztime=60s ./crlite
+
+      - name: Fuzz revocation index deserialization
+        if: ${{ !cancelled() }}
+        run: go test -run='^FuzzIndex$' -fuzz='^FuzzIndex$' -fuzztime=60s ./internal
+
+      - name: Upload failing inputs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-failing-inputs
+          path: |
+            crlite/testdata/fuzz
+            internal/testdata/fuzz
+          if-no-files-found: ignore
+
   integration:
     # Exercises the env-gated tests in upki/ against a real upki cache:
     # clone rustls/upki at a pinned rev, run `upki fetch`, re-encode the
