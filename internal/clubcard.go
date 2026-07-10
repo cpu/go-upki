@@ -134,20 +134,22 @@ func bytesToLimbs(a [32]byte) [W]uint64 {
 
 // bitsXorIsZero reports whether the dot product of coef with the
 // 256 bits of column starting at rowOffset is 0 over GF(2).
+//
+// Rows past the end of column read as zero.
 func bitsXorIsZero(column []uint64, rowOffset uint64, coef [W]uint64) bool {
-	var acc uint64
-	for limb := 0; limb < W; limb++ {
-		m := coef[limb]
-		baseBit := rowOffset + uint64(limb)*64
-		for m != 0 {
-			j := bits.TrailingZeros64(m)
-			m &= m - 1
-			bit := baseBit + uint64(j)
-			acc ^= (column[bit>>6] >> (bit & 63)) & 1
+	limb := rowOffset / 64
+	shift := rowOffset % 64
+
+	var r uint64
+	for i := limb; i < min(uint64(len(column)), limb+W); i++ {
+		tmp := column[i] >> shift
+		if shift != 0 && i+1 < uint64(len(column)) {
+			tmp |= column[i+1] << (64 - shift)
 		}
+		r ^= tmp & coef[i-limb]
 	}
 
-	return acc == 0
+	return bits.OnesCount64(r)&1 == 0
 }
 
 // W is the §4.3 ribbon width in 64-bit limbs (w = 256).

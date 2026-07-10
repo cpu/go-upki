@@ -88,6 +88,13 @@ func readCoverage(s *cryptobyte.String) (coverage, error) {
 		return nil, fmt.Errorf("%w: coverage count", ErrDeserialize)
 	}
 
+	// Each entry is a 32-byte log id plus two u64 timestamps. Reject counts
+	// that promise more data than remains before allocating.
+	const coverageEntrySize = 32 + 8 + 8
+	if uint64(count)*coverageEntrySize > uint64(len(*s)) {
+		return nil, fmt.Errorf("%w: coverage count %d exceeds input", ErrDeserialize, count)
+	}
+
 	cov := make(coverage, count)
 	for i := uint16(0); i < count; i++ {
 		id, err := readLogId(s)
@@ -181,7 +188,32 @@ func readFilter(s *cryptobyte.String) (internal.Filter, error) {
 		return f, fmt.Errorf("exact filter: %w", err)
 	}
 
+	if err := validateBlocks(&f); err != nil {
+		return f, err
+	}
+
 	return f, nil
+}
+
+// validateBlocks checks each block's HRank against the parsed column count
+// so [internal.Filter.Contains] cannot index a column that does not exist.
+//
+// Row offsets and moduli need no validation. Contains() treats out-of-range
+// rows as zero (see internal.bitsXorIsZero).
+func validateBlocks(f *internal.Filter) error {
+	for id, meta := range f.Blocks {
+		if meta.HModulus == 0 {
+			// Empty block: Contains returns before touching X.
+			continue
+		}
+
+		if int(meta.HRank) > len(f.X) {
+			return fmt.Errorf("%w: block %x rank %d exceeds column count %d",
+				ErrDeserialize, id, meta.HRank, len(f.X))
+		}
+	}
+
+	return nil
 }
 
 // readU64Seq parses a `u64 items<count>` sequence: a uint32 word-count prefix
@@ -190,6 +222,12 @@ func readU64Seq(s *cryptobyte.String) ([]uint64, error) {
 	var count uint32
 	if !s.ReadUint32(&count) {
 		return nil, fmt.Errorf("%w: u64 seq count", ErrDeserialize)
+	}
+
+	// Reject counts that promise more data than remains before allocating,
+	// so a short malicious input can't provoke a huge allocation.
+	if uint64(count)*8 > uint64(len(*s)) {
+		return nil, fmt.Errorf("%w: u64 seq count %d exceeds input", ErrDeserialize, count)
 	}
 
 	items := make([]uint64, count)
@@ -223,6 +261,21 @@ func readBlocks(s *cryptobyte.String) (map[[32]byte]*internal.BlockMeta, error) 
 	var count uint32
 	if !s.ReadUint32(&count) {
 		return nil, fmt.Errorf("%w: index count", ErrDeserialize)
+	}
+
+	// Each entry is at least a 32-byte block id plus BlockMeta's fixed
+	// fields (see readBlockMeta). Reject counts that promise more data
+	// than remains before allocating.
+	const minIndexEntrySize = 32 + // block_id
+		4 + // approx_filter_m (u32)
+		1 + // approx_filter_rank (u8)
+		4 + // approx_filter_offset (u32)
+		4 + // exact_filter_m (u32)
+		4 + // exact_filter_offset (u32)
+		1 + // inverted (u8)
+		2 // exception count (u16)
+	if uint64(count)*minIndexEntrySize > uint64(len(*s)) {
+		return nil, fmt.Errorf("%w: index count %d exceeds input", ErrDeserialize, count)
 	}
 
 	blocks := make(map[[32]byte]*internal.BlockMeta, count)
