@@ -267,6 +267,50 @@ func TestLookupConcurrent(t *testing.T) {
 // fallback path where entry-section bounds are only enforced at read time.
 type readAtOnly struct{ io.ReaderAt }
 
+// TestLogDirOrder covers the log-directory ordering guard: a directory that
+// is not strictly ascending by log id (unsorted or duplicate) is rejected at
+// construction, since findLog's binary search relies on that order.
+func TestLogDirOrder(t *testing.T) {
+	t.Parallel()
+
+	// Two logs, sorted 0xaa < 0xbb by the builder.
+	logA := [32]byte{0xaa}
+	logB := [32]byte{0xbb}
+	enc := test.Index{Filters: []test.IndexFilter{
+		{Filename: "a.filter", Coverage: []test.Coverage{{LogId: logA, MinTimestamp: 100, MaxTimestamp: 200}}},
+		{Filename: "b.filter", Coverage: []test.Coverage{{LogId: logB, MinTimestamp: 100, MaxTimestamp: 200}}},
+	}}.Bytes()
+
+	// The two 42-byte log-dir entries begin right after the header and the
+	// two 32-byte filename slots.
+	dirStart := headerSize + 2*filenameSize
+	e0 := dirStart
+	e1 := dirStart + logDirEntrySize
+
+	t.Run("unsorted", func(t *testing.T) {
+		t.Parallel()
+
+		// Swap the two directory entries so log ids descend.
+		bad := bytes.Clone(enc)
+		copy(bad[e0:e0+logDirEntrySize], enc[e1:e1+logDirEntrySize])
+		copy(bad[e1:e1+logDirEntrySize], enc[e0:e0+logDirEntrySize])
+		if _, err := NewIndexFromReader(bytes.NewReader(bad), nil); !errors.Is(err, errInvalidIndex) {
+			t.Fatalf("want errInvalidIndex, got %v", err)
+		}
+	})
+
+	t.Run("duplicate log id", func(t *testing.T) {
+		t.Parallel()
+
+		// Overwrite the second entry's 32-byte log id with the first's.
+		bad := bytes.Clone(enc)
+		copy(bad[e1:e1+32], enc[e0:e0+32])
+		if _, err := NewIndexFromReader(bytes.NewReader(bad), nil); !errors.Is(err, errInvalidIndex) {
+			t.Fatalf("want errInvalidIndex, got %v", err)
+		}
+	})
+}
+
 // TestLookupCorruptEntries covers Lookup's error paths: an entry section
 // that can't be fully read, and an entry whose filter index exceeds the
 // filename table.

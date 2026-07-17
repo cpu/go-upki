@@ -148,6 +148,10 @@ func NewIndexFromReader(r io.ReaderAt, closer io.Closer) (*Index, error) {
 		filenames[i] = string(slot[:end])
 	}
 
+	if err := validateLogDirOrder(logDir, numLogs); err != nil {
+		return nil, err
+	}
+
 	tablesEnd := int64(headerSize) + tablesLen
 	if err := validateEntrySections(r, logDir, numLogs, tablesEnd); err != nil {
 		return nil, err
@@ -160,6 +164,28 @@ func NewIndexFromReader(r io.ReaderAt, closer io.Closer) (*Index, error) {
 		r:         r,
 		closer:    closer,
 	}, nil
+}
+
+// validateLogDirOrder checks that the log directory is strictly ascending by
+// log_id.
+//
+// The spec requires entries to be sorted lexicographically with no duplicate
+// log_id. Checking for strict ordering enforces both at once.
+//
+// findLog's binary search depends on this order, so an unsorted directory would
+// otherwise miss present logs (yielding a wrong not-covered result), while a
+// duplicate would make lookups nondeterministic.
+func validateLogDirOrder(logDir []byte, numLogs int) error {
+	for i := 1; i < numLogs; i++ {
+		prev := logDir[(i-1)*logDirEntrySize : (i-1)*logDirEntrySize+32]
+		cur := logDir[i*logDirEntrySize : i*logDirEntrySize+32]
+		if bytes.Compare(prev, cur) >= 0 {
+			return fmt.Errorf("%w: log directory not strictly sorted by log id at index %d",
+				errInvalidIndex, i)
+		}
+	}
+
+	return nil
 }
 
 // validateEntrySections checks every log directory entry's on-demand entry
