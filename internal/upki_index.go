@@ -148,6 +148,11 @@ func NewIndexFromReader(r io.ReaderAt, closer io.Closer) (*Index, error) {
 		filenames[i] = string(slot[:end])
 	}
 
+	tablesEnd := int64(headerSize) + tablesLen
+	if err := validateEntrySections(r, logDir, numLogs, tablesEnd); err != nil {
+		return nil, err
+	}
+
 	return &Index{
 		filenames: filenames,
 		logDir:    logDir,
@@ -155,6 +160,56 @@ func NewIndexFromReader(r io.ReaderAt, closer io.Closer) (*Index, error) {
 		r:         r,
 		closer:    closer,
 	}, nil
+}
+
+// validateEntrySections checks every log directory entry's on-demand entry
+// section against the spec's bounds: it MUST lie entirely within the file and
+// MUST NOT overlap the header, filename table, or log directory.
+//
+// The lower bound (no overlap with the header/tables) and integer-overflow
+// safety are checked unconditionally. The upper bound (within the file) is
+// checked when the reader reports its size; otherwise a short read is still
+// caught at [Index.Lookup] time by readFullAt.
+func validateEntrySections(r io.ReaderAt, logDir []byte, numLogs int, tablesEnd int64) error {
+	size, haveSize := readerSize(r)
+	for i := range numLogs {
+		off := i * logDirEntrySize
+		entryOffset := int64(binary.BigEndian.Uint64(logDir[off+32 : off+40]))
+		count := int64(binary.BigEndian.Uint16(logDir[off+40 : off+42]))
+		sectionLen := count * entrySize
+
+		if entryOffset < tablesEnd {
+			return fmt.Errorf("%w: entry section offset %d overlaps header/tables (end %d)",
+				errInvalidIndex, entryOffset, tablesEnd)
+		}
+		// entryOffset is a file offset < 2^63 and sectionLen <= 65535*18, so
+		// entryOffset + sectionLen cannot overflow int64.
+		if haveSize && entryOffset+sectionLen > size {
+			return fmt.Errorf("%w: entry section [%d, %d) exceeds file size %d",
+				errInvalidIndex, entryOffset, entryOffset+sectionLen, size)
+		}
+	}
+
+	return nil
+}
+
+// readerSize reports the total byte size of r when it exposes one, matching
+// the concrete readers this package is constructed with: an [*os.File] (via
+// Stat) and a [*bytes.Reader] / [*io.SectionReader] (via a Size method).
+func readerSize(r io.ReaderAt) (int64, bool) {
+	switch v := r.(type) {
+	case interface{ Size() int64 }:
+		return v.Size(), true
+	case interface{ Stat() (os.FileInfo, error) }:
+		info, err := v.Stat()
+		if err != nil {
+			return 0, false
+		}
+
+		return info.Size(), true
+	default:
+		return 0, false
+	}
 }
 
 // Close releases the closer supplied at construction, if any.
