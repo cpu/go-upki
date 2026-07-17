@@ -201,15 +201,15 @@ func readFilter(s *cryptobyte.String) (internal.Filter, error) {
 // validateBlocks checks each block's HRank against the parsed column count
 // so [internal.Filter.Contains] cannot index a column that does not exist.
 //
+// The spec makes this unconditional: any block whose approx_rank exceeds the
+// column count renders the filter malformed. An empty block (HModulus == 0)
+// never indexes X at query time (Contains returns early), but the rank is
+// still checked so a spec-conformant reader rejects the same files.
+//
 // Row offsets and moduli need no validation. Contains() treats out-of-range
 // rows as zero (see internal.bitsXorIsZero).
 func validateBlocks(f *internal.Filter) error {
 	for id, meta := range f.Blocks {
-		if meta.HModulus == 0 {
-			// Empty block: Contains returns before touching X.
-			continue
-		}
-
 		if int(meta.HRank) > len(f.X) {
 			return fmt.Errorf("%w: block %x rank %d exceeds column count %d",
 				ErrDeserialize, id, meta.HRank, len(f.X))

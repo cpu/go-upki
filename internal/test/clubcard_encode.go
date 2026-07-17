@@ -39,6 +39,11 @@ type Issuer struct {
 	// this raw byte instead of the 0/1 derived from the block. It lets tests
 	// emit a malformed flag (e.g. 2) that a conforming parser must reject.
 	InvertedByte *uint8
+	// RankByte, when non-nil, overrides the on-wire approx_filter_rank with
+	// this raw byte without changing how many approximate-filter columns are
+	// emitted. It lets tests claim a rank that exceeds the column count, which
+	// a conforming parser must reject.
+	RankByte *uint8
 }
 
 // Coverage is one CT log's claimed timestamp range, inclusive on both ends,
@@ -104,7 +109,11 @@ func (f Filter) Bytes() []byte {
 	for _, b := range blocks {
 		out.AddBytes(b.id[:])
 		out.AddUint32(uint32(b.approxM))
-		out.AddUint8(uint8(b.rank))
+		if b.rankByte != nil {
+			out.AddUint8(*b.rankByte)
+		} else {
+			out.AddUint8(uint8(b.rank))
+		}
 		out.AddUint32(uint32(b.hOffset))
 		out.AddUint32(uint32(b.exactM))
 		out.AddUint32(uint32(b.gOffset))
@@ -151,6 +160,9 @@ type block struct {
 	// invertedByte, when non-nil, is written verbatim as the on-wire
 	// `inverted` flag instead of the 0/1 derived from `inverted`.
 	invertedByte *uint8
+	// rankByte, when non-nil, is written verbatim as the on-wire
+	// approx_filter_rank instead of `rank`, without affecting column output.
+	rankByte *uint8
 
 	approxM    int
 	rank       int
@@ -177,7 +189,7 @@ func buildBlock(iss Issuer, rng *rand.Rand) block {
 
 	// R == U gets the §3.1 empty inverted block encoding (m == 0), and
 	// an empty R the non-inverted equivalent.
-	b := block{id: iss.SpkiHash, inverted: nR > 0 && nR == nU, invertedByte: iss.InvertedByte}
+	b := block{id: iss.SpkiHash, inverted: nR > 0 && nR == nU, invertedByte: iss.InvertedByte, rankByte: iss.RankByte}
 	if nR == 0 || b.inverted {
 		return b
 	}
