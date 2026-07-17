@@ -87,7 +87,7 @@ func (f Filter) Bytes() []byte {
 
 	// Serialize, mirroring crlite/parser.go
 	var out cryptobyte.Builder
-	out.AddBytes([]byte{4, 0}) // version, the format's sole little-endian field
+	out.AddBytes([]byte{4, 0}) // version(u8)=4, reserved0(u8)=0
 
 	out.AddUint16(uint16(len(f.Coverage)))
 	for _, c := range f.Coverage {
