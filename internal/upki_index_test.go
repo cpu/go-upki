@@ -2,6 +2,7 @@ package internal
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -261,6 +262,11 @@ func TestLookupConcurrent(t *testing.T) {
 	}
 }
 
+// readAtOnly wraps an io.ReaderAt to hide any Size/Stat method, so the index
+// reader cannot learn the underlying length up front. It exercises the
+// fallback path where entry-section bounds are only enforced at read time.
+type readAtOnly struct{ io.ReaderAt }
+
 // TestLookupCorruptEntries covers Lookup's error paths: an entry section
 // that can't be fully read, and an entry whose filter index exceeds the
 // filename table.
@@ -274,12 +280,24 @@ func TestLookupCorruptEntries(t *testing.T) {
 		}},
 	}}.Bytes()
 
-	t.Run("truncated entry section", func(t *testing.T) {
+	t.Run("truncated entry section rejected at construction", func(t *testing.T) {
 		t.Parallel()
 
 		// Chop into the trailing 18-byte entry: header and tables still
-		// parse, but reading the entry section comes up short.
-		idx, err := NewIndexFromReader(bytes.NewReader(enc[:len(enc)-5]), nil)
+		// parse, but the entry section now runs past the (sized) reader's
+		// end, so construction rejects it up front.
+		_, err := NewIndexFromReader(bytes.NewReader(enc[:len(enc)-5]), nil)
+		if !errors.Is(err, errInvalidIndex) {
+			t.Fatalf("want errInvalidIndex, got %v", err)
+		}
+	})
+
+	t.Run("truncated entry section caught at lookup for sizeless reader", func(t *testing.T) {
+		t.Parallel()
+
+		// A reader that does not report its size skips construction's
+		// upper-bound check, so the short read is caught at Lookup time.
+		idx, err := NewIndexFromReader(readAtOnly{bytes.NewReader(enc[:len(enc)-5])}, nil)
 		if err != nil {
 			t.Fatalf("NewIndexFromReader: %v", err)
 		}
@@ -300,6 +318,20 @@ func TestLookupCorruptEntries(t *testing.T) {
 			t.Fatalf("NewIndexFromReader: %v", err)
 		}
 		if _, err := idx.Lookup(id, ts); !errors.Is(err, errInvalidIndex) {
+			t.Fatalf("want errInvalidIndex, got %v", err)
+		}
+	})
+
+	t.Run("entry section offset overlaps tables", func(t *testing.T) {
+		t.Parallel()
+
+		// The sole log-dir entry's u64 offset follows its 32-byte log id,
+		// after the header and one 32-byte filename slot. Point it at 0 so
+		// the entry section would overlap the header/tables.
+		bad := bytes.Clone(enc)
+		offField := headerSize + filenameSize + 32
+		binary.BigEndian.PutUint64(bad[offField:offField+8], 0)
+		if _, err := NewIndexFromReader(bytes.NewReader(bad), nil); !errors.Is(err, errInvalidIndex) {
 			t.Fatalf("want errInvalidIndex, got %v", err)
 		}
 	})
