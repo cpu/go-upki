@@ -13,9 +13,9 @@ import (
 // On-disk layout of index.bin. Documented at
 // https://github.com/rustls/upki/blob/main/upki/src/revocation/index.rs
 //
-//	HEADER (13 bytes):
-//	  magic:         [8]byte    "upkiidx0"
-//	  num_filenames: u8
+//	HEADER (14 bytes):
+//	  magic:         [8]byte    "upkiidx1"
+//	  num_filenames: u16 BE
 //	  num_log_ids:   u32 BE
 //
 //	TABLES (read eagerly):
@@ -27,18 +27,21 @@ import (
 //
 //	ENTRY SECTIONS (read on demand via ReadAt):
 //	  entry[num_entries]:
-//	    filter_index:  u8
+//	    filter_index:  u16 BE
 //	    min_timestamp: u64 BE
 //	    max_timestamp: u64 BE
+//
+// The legacy "upkiidx0" format encoded num_filenames and filter_index as u8;
+// it is not supported.
 const (
 	RevocationSubdir = "revocation"
 	indexFilename    = "index.bin"
-	indexMagic       = "upkiidx0"
+	indexMagic       = "upkiidx1"
 	filenameSize     = 32 // NULL-padded UTF-8 filename slot
 
-	headerSize      = 8 + 1 + 4  // 8 byte magic + num_filenames(u8) + num_log_ids(u32)
+	headerSize      = 8 + 2 + 4  // 8 byte magic + num_filenames(u16) + num_log_ids(u32)
 	logDirEntrySize = 32 + 8 + 2 // 32 byte log_id + entry-section offset(u64) + count(u16)
-	entrySize       = 1 + 8 + 8  // filter_idx(u8) + min_ts(u64) + max_ts(u64)
+	entrySize       = 2 + 8 + 8  // filter_idx(u16) + min_ts(u64) + max_ts(u64)
 )
 
 // errInvalidIndex indicates index.bin is malformed (bad magic, truncated,
@@ -106,7 +109,7 @@ func NewIndex(cacheDir string) (*Index, error) {
 // The returned Index eagerly consumes the header and lookup tables from
 // r and entry sections are read on demand during [Index.Lookup].
 func NewIndexFromReader(r io.ReaderAt, closer io.Closer) (*Index, error) {
-	// header is: magic[8] | num_filenames(u8) | num_log_ids(u32 BE).
+	// header is: magic[8] | num_filenames(u16 BE) | num_log_ids(u32 BE).
 	var header [headerSize]byte
 	if _, err := readFullAt(r, header[:], 0); err != nil {
 		return nil, fmt.Errorf("%w: read header: %w", errInvalidIndex, err)
@@ -114,8 +117,8 @@ func NewIndexFromReader(r io.ReaderAt, closer io.Closer) (*Index, error) {
 	if !bytes.Equal(header[:8], []byte(indexMagic)) {
 		return nil, fmt.Errorf("%w: bad magic", errInvalidIndex)
 	}
-	numFilenames := int(header[8])
-	numLogs := int(binary.BigEndian.Uint32(header[9:13]))
+	numFilenames := int(binary.BigEndian.Uint16(header[8:10]))
+	numLogs := int(binary.BigEndian.Uint32(header[10:14]))
 
 	// Filename table and log dir are contiguous and their sizes are fully
 	// determined by the header, so fetch both in one read. num_log_ids is
@@ -204,11 +207,11 @@ func (idx *Index) Lookup(logID [32]byte, timestamp uint64) ([]string, error) {
 
 	var filenames []string
 	for i := range int(count) {
-		// entry is: filter_idx(u8) | min_ts(u64) | max_ts(u64).
+		// entry is: filter_idx(u16) | min_ts(u64) | max_ts(u64).
 		off := i * entrySize
-		filterIdx := int(buf[off])
-		minTS := binary.BigEndian.Uint64(buf[off+1 : off+9])
-		maxTS := binary.BigEndian.Uint64(buf[off+9 : off+17])
+		filterIdx := int(binary.BigEndian.Uint16(buf[off : off+2]))
+		minTS := binary.BigEndian.Uint64(buf[off+2 : off+10])
+		maxTS := binary.BigEndian.Uint64(buf[off+10 : off+18])
 		if minTS > timestamp || timestamp > maxTS {
 			continue
 		}
