@@ -33,7 +33,7 @@ func FuzzIndex(f *testing.F) {
 		},
 	}
 	f.Add(seed.Bytes(), logA[:], uint64(150))
-	f.Add([]byte("upkiidx0"), []byte{}, uint64(0)) // bare magic
+	f.Add([]byte("upkiidx1"), []byte{}, uint64(0)) // bare magic
 
 	f.Fuzz(func(t *testing.T, data, logID []byte, timestamp uint64) {
 		idx, err := NewIndexFromReader(bytes.NewReader(data), nil)

@@ -122,16 +122,21 @@ jobs:
 
   integration:
     # Exercises the env-gated tests in upki/ against a real upki cache:
-    # clone rustls/upki at a pinned rev, run `upki fetch`, re-encode the
+    # clone upki at a pinned rev, run `upki fetch`, re-encode the
     # filters into V4 with tools/crlite-reencode, and run the Go tests
     # with UPKI_CACHE_DIR pointing at the re-encoded cache.
     #
     # TODO(XXX): Once upstream is fetching V4 CRLite filters, remove the
     #   tools/crlite-renencode bits.
+    #
+    # TODO(XXX): UPKI_REPO points at the cpu/upki fork so `upki fetch` writes
+    #   the "upkiidx1" (u16) index.bin from the unmerged rustls/upki#200. Point
+    #   it back at rustls/upki once that lands.
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
-      UPKI_REV: b68d7deaee0837bae29ef34fb3c4b1f11fda35ac
+      UPKI_REPO: cpu/upki
+      UPKI_REV: 7d4e416dd51eb97aacaf56c8a8c2f0b7f6cd29ce
       UPKI_CACHE_DIR: ${{ github.workspace }}/_cache/go-upki
     steps:
       - name: Check out go-upki
@@ -144,10 +149,10 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Check out rustls/upki at pinned rev
+      - name: Check out upki at pinned rev
         uses: actions/checkout@v7
         with:
-          repository: rustls/upki
+          repository: ${{ env.UPKI_REPO }}
           ref: ${{ env.UPKI_REV }}
           path: _upstream/upki
           persist-credentials: false

@@ -277,7 +277,7 @@ func TestLookupCorruptEntries(t *testing.T) {
 	t.Run("truncated entry section", func(t *testing.T) {
 		t.Parallel()
 
-		// Chop into the trailing 17-byte entry: header and tables still
+		// Chop into the trailing 18-byte entry: header and tables still
 		// parse, but reading the entry section comes up short.
 		idx, err := NewIndexFromReader(bytes.NewReader(enc[:len(enc)-5]), nil)
 		if err != nil {
@@ -291,9 +291,10 @@ func TestLookupCorruptEntries(t *testing.T) {
 	t.Run("filter index out of range", func(t *testing.T) {
 		t.Parallel()
 
-		// The entry's filter_idx byte leads the trailing 17-byte entry.
+		// The entry's filter_idx(u16) leads the trailing 18-byte entry;
+		// its high byte alone puts the index far past the filename table.
 		bad := bytes.Clone(enc)
-		bad[len(bad)-17] = 0xff
+		bad[len(bad)-18] = 0xff
 		idx, err := NewIndexFromReader(bytes.NewReader(bad), nil)
 		if err != nil {
 			t.Fatalf("NewIndexFromReader: %v", err)
@@ -321,8 +322,8 @@ func testInput() ([32]byte, uint64) {
 func TestTruncatedTables(t *testing.T) {
 	t.Parallel()
 
-	// magic | num_filenames=1 | num_log_ids=0, then EOF.
-	data := append([]byte(indexMagic), 1, 0, 0, 0, 0)
+	// magic | num_filenames(u16)=1 | num_log_ids(u32)=0, then EOF.
+	data := append([]byte(indexMagic), 0, 1, 0, 0, 0, 0)
 	_, err := NewIndexFromReader(bytes.NewReader(data), nil)
 	if !errors.Is(err, errInvalidIndex) {
 		t.Fatalf("want errInvalidIndex, got %v", err)

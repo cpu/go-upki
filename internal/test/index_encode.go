@@ -31,23 +31,23 @@ type IndexFilter struct {
 // Bytes builds the index and returns its wire encoding, suitable for
 // internal.NewIndexFromReader or writing out as index.bin.
 //
-// It panics on inputs the format cannot represent (more than 255 filters,
+// It panics on inputs the format cannot represent (more than 65535 filters,
 // filenames longer than 32 bytes).
 func (idx Index) Bytes() []byte {
 	const (
-		magic           = "upkiidx0"
+		magic           = "upkiidx1"
 		filenameSize    = 32
-		headerSize      = 8 + 1 + 4
+		headerSize      = 8 + 2 + 4
 		logDirEntrySize = 32 + 8 + 2
-		entrySize       = 1 + 8 + 8
+		entrySize       = 2 + 8 + 8
 	)
 
-	if len(idx.Filters) > 255 {
-		panic("test: more than 255 index filters")
+	if len(idx.Filters) > 65535 {
+		panic("test: more than 65535 index filters")
 	}
 
 	type entry struct {
-		filterIdx uint8
+		filterIdx uint16
 		min, max  uint64
 	}
 	byLog := make(map[[32]byte][]entry)
@@ -56,7 +56,7 @@ func (idx Index) Bytes() []byte {
 			panic("test: index filter filename longer than 32 bytes")
 		}
 		for _, c := range f.Coverage {
-			byLog[c.LogId] = append(byLog[c.LogId], entry{uint8(i), c.MinTimestamp, c.MaxTimestamp})
+			byLog[c.LogId] = append(byLog[c.LogId], entry{uint16(i), c.MinTimestamp, c.MaxTimestamp})
 		}
 	}
 
@@ -68,7 +68,7 @@ func (idx Index) Bytes() []byte {
 
 	var out cryptobyte.Builder
 	out.AddBytes([]byte(magic))
-	out.AddUint8(uint8(len(idx.Filters)))
+	out.AddUint16(uint16(len(idx.Filters)))
 	out.AddUint32(uint32(len(logIds)))
 
 	for _, f := range idx.Filters {
@@ -89,7 +89,7 @@ func (idx Index) Bytes() []byte {
 
 	for _, id := range logIds {
 		for _, e := range byLog[id] {
-			out.AddUint8(e.filterIdx)
+			out.AddUint16(e.filterIdx)
 			out.AddUint64(e.min)
 			out.AddUint64(e.max)
 		}

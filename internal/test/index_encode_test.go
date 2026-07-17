@@ -2,6 +2,7 @@ package test_test
 
 import (
 	"bytes"
+	"fmt"
 	"slices"
 	"testing"
 
@@ -69,6 +70,34 @@ func TestIndexEmpty(t *testing.T) {
 
 	if names, err := idx.Lookup([32]byte{0xaa}, 150); err != nil || len(names) != 0 {
 		t.Errorf("Lookup = (%q, err=%v), want a clean miss", names, err)
+	}
+}
+
+// TestIndexU16FilterIndex verifies a cache with more than 256 filters, so a
+// covering filter's index exceeds the old u8 range, round-trips. This is the
+// headroom the "upkiidx1" format's u16 num_filenames and filter_index add.
+func TestIndexU16FilterIndex(t *testing.T) {
+	t.Parallel()
+
+	const n = 300
+	logA := [32]byte{0xaa}
+	filters := make([]test.IndexFilter, n)
+	for i := range filters {
+		// A distinct filename per filter; only the last covers logA, so its
+		// index (n-1 = 299) is what Lookup must resolve.
+		filters[i] = test.IndexFilter{Filename: fmt.Sprintf("f%03d.filter", i)}
+	}
+	filters[n-1].Coverage = []test.Coverage{{LogId: logA, MinTimestamp: 100, MaxTimestamp: 200}}
+
+	idx := parseIndex(t, test.Index{Filters: filters})
+	defer idx.Close()
+
+	names, err := idx.Lookup(logA, 150)
+	if err != nil {
+		t.Fatalf("Lookup: %v", err)
+	}
+	if want := []string{fmt.Sprintf("f%03d.filter", n-1)}; !slices.Equal(names, want) {
+		t.Errorf("Lookup = %q, want %q", names, want)
 	}
 }
 
