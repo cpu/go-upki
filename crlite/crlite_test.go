@@ -209,6 +209,25 @@ func TestFromBytesInvalidInverted(t *testing.T) {
 	}
 }
 
+// TestFromBytesEmptyBlockRankExceedsColumns verifies that an empty block
+// (approx_filter_m == 0) whose approx_filter_rank exceeds the approximate
+// filter's column count is rejected, even though such a block never indexes
+// a column at query time.
+func TestFromBytesEmptyBlockRankExceedsColumns(t *testing.T) {
+	t.Parallel()
+
+	rank := uint8(5)
+	// An issuer with no serials builds an empty block (m == 0, 0 columns);
+	// RankByte claims 5 columns that do not exist.
+	enc := test.Filter{Issuers: []test.Issuer{{
+		SpkiHash: testFilterIssuer,
+		RankByte: &rank,
+	}}}.Bytes()
+	if _, err := FromBytes(enc); !errors.Is(err, ErrDeserialize) {
+		t.Fatalf("want ErrDeserialize, got %v", err)
+	}
+}
+
 var (
 	testFilterIssuer = IssuerSpkiHash{1, 2, 3}
 	testFilterLog    = LogId{9, 9, 9}
