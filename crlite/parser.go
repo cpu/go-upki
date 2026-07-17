@@ -110,6 +110,12 @@ func readCoverage(s *cryptobyte.String) (coverage, error) {
 			return nil, err
 		}
 
+		// The spec requires coverage entries to have distinct log ids. A
+		// duplicate would otherwise silently overwrite an earlier interval.
+		if _, dup := cov[id]; dup {
+			return nil, fmt.Errorf("%w: duplicate coverage log id", ErrDeserialize)
+		}
+
 		cov[id] = iv
 	}
 

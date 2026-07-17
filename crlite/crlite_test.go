@@ -209,6 +209,23 @@ func TestFromBytesInvalidInverted(t *testing.T) {
 	}
 }
 
+// TestFromBytesDuplicateCoverageLog verifies two coverage entries sharing a
+// log id are rejected with ErrDeserialize.
+func TestFromBytesDuplicateCoverageLog(t *testing.T) {
+	t.Parallel()
+
+	enc := test.Filter{
+		Issuers: []test.Issuer{{SpkiHash: testFilterIssuer, Revoked: [][]byte{testFilterSerial}}},
+		Coverage: []test.Coverage{
+			{LogId: testFilterLog, MinTimestamp: 100, MaxTimestamp: 200},
+			{LogId: testFilterLog, MinTimestamp: 300, MaxTimestamp: 400},
+		},
+	}.Bytes()
+	if _, err := FromBytes(enc); !errors.Is(err, ErrDeserialize) {
+		t.Fatalf("want ErrDeserialize, got %v", err)
+	}
+}
+
 // TestFromBytesEmptyBlockRankExceedsColumns verifies that an empty block
 // (approx_filter_m == 0) whose approx_filter_rank exceeds the approximate
 // filter's column count is rejected, even though such a block never indexes
