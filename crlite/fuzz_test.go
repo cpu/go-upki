@@ -38,7 +38,7 @@ func FuzzFromBytes(f *testing.F) {
 		},
 	}
 	f.Add(seed.Bytes())
-	f.Add([]byte{4, 0}) // bare version tag
+	f.Add([]byte{4, 0}) // bare version(u8) + reserved0(u8)
 
 	f.Fuzz(func(t *testing.T, data []byte) {
 		rf, err := FromBytes(data)

@@ -1,7 +1,6 @@
 package crlite
 
 import (
-	"encoding/binary"
 	"errors"
 	"fmt"
 
@@ -24,7 +23,8 @@ var (
 // ```
 //
 //	struct {
-//	    uint16          version;             // little-endian, V4 == 4
+//	    uint8           version;             // V4 == 4
+//	    uint8           reserved0;           // MUST be 0
 //	    CRLiteCoverage  coverage;
 //	    ClubcardIndex   index;
 //	    uint8           approx_filter_count;
@@ -40,17 +40,20 @@ var (
 func FromBytes(data []byte) (*RevocationFilter, error) {
 	s := cryptobyte.String(data)
 
-	// Version is a little-endian u16. cryptobyte's ReadUint16 is big-endian,
-	// so read it as raw bytes and decode by hand.
-	var verBytes [2]byte
-	if !s.CopyBytes(verBytes[:]) {
+	// The version is a u8 followed by a reserved0 u8 that MUST be zero.
+	var version, reserved0 uint8
+	if !s.ReadUint8(&version) || !s.ReadUint8(&reserved0) {
 		return nil, fmt.Errorf("%w: version", ErrDeserialize)
 	}
 
-	version := binary.LittleEndian.Uint16(verBytes[:])
 	// v4 is the only encoding tag this package recognizes.
 	if version != 4 {
 		return nil, fmt.Errorf("%w: %d", ErrUnsupportedFormat, version)
+	}
+	// A future format version may repurpose reserved0 to signal additional
+	// metadata, but v4 requires it to be zero.
+	if reserved0 != 0 {
+		return nil, fmt.Errorf("%w: non-zero reserved0 byte %d", ErrDeserialize, reserved0)
 	}
 
 	cov, err := readCoverage(&s)

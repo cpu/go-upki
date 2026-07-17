@@ -157,6 +157,18 @@ func TestFromBytesUnsupportedVersion(t *testing.T) {
 	}
 }
 
+// TestFromBytesNonZeroReserved0 verifies a non-zero reserved0 byte after
+// the version is rejected with ErrDeserialize.
+func TestFromBytesNonZeroReserved0(t *testing.T) {
+	t.Parallel()
+
+	enc := test.Filter{}.Bytes()
+	enc[1] = 1
+	if _, err := FromBytes(enc); !errors.Is(err, ErrDeserialize) {
+		t.Fatalf("want ErrDeserialize, got %v", err)
+	}
+}
+
 // TestFromBytesTrailingData verifies bytes past a well-formed filter are
 // rejected with ErrDeserialize.
 func TestFromBytesTrailingData(t *testing.T) {
