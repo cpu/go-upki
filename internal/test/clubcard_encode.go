@@ -35,6 +35,10 @@ type Issuer struct {
 	Revoked [][]byte
 	// NotRevoked holds the raw serials to mark not revoked.
 	NotRevoked [][]byte
+	// InvertedByte, when non-nil, overrides the on-wire `inverted` flag with
+	// this raw byte instead of the 0/1 derived from the block. It lets tests
+	// emit a malformed flag (e.g. 2) that a conforming parser must reject.
+	InvertedByte *uint8
 }
 
 // Coverage is one CT log's claimed timestamp range, inclusive on both ends,
@@ -104,9 +108,12 @@ func (f Filter) Bytes() []byte {
 		out.AddUint32(uint32(b.hOffset))
 		out.AddUint32(uint32(b.exactM))
 		out.AddUint32(uint32(b.gOffset))
-		if b.inverted {
+		switch {
+		case b.invertedByte != nil:
+			out.AddUint8(*b.invertedByte)
+		case b.inverted:
 			out.AddUint8(1)
-		} else {
+		default:
 			out.AddUint8(0)
 		}
 		out.AddUint16(uint16(len(b.exceptions)))
@@ -141,6 +148,9 @@ func (f Filter) Bytes() []byte {
 type block struct {
 	id       [32]byte
 	inverted bool
+	// invertedByte, when non-nil, is written verbatim as the on-wire
+	// `inverted` flag instead of the 0/1 derived from `inverted`.
+	invertedByte *uint8
 
 	approxM    int
 	rank       int
@@ -167,7 +177,7 @@ func buildBlock(iss Issuer, rng *rand.Rand) block {
 
 	// R == U gets the §3.1 empty inverted block encoding (m == 0), and
 	// an empty R the non-inverted equivalent.
-	b := block{id: iss.SpkiHash, inverted: nR > 0 && nR == nU}
+	b := block{id: iss.SpkiHash, inverted: nR > 0 && nR == nU, invertedByte: iss.InvertedByte}
 	if nR == 0 || b.inverted {
 		return b
 	}

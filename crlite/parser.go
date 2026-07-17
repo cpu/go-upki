@@ -337,6 +337,11 @@ func readBlockMeta(s *cryptobyte.String) (*internal.BlockMeta, error) {
 		return nil, fmt.Errorf("%w: block meta header", ErrDeserialize)
 	}
 
+	// inverted is a polarity flag that MUST be either 0 or 1.
+	if inverted > 1 {
+		return nil, fmt.Errorf("%w: inverted flag %d not 0 or 1", ErrDeserialize, inverted)
+	}
+
 	var count uint16
 	if !s.ReadUint16(&count) {
 		return nil, fmt.Errorf("%w: block meta exception count", ErrDeserialize)

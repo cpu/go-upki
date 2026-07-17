@@ -192,6 +192,23 @@ func TestFromBytesDuplicateBlock(t *testing.T) {
 	}
 }
 
+// TestFromBytesInvalidInverted verifies a block whose inverted flag is
+// neither 0 nor 1 is rejected with ErrDeserialize.
+func TestFromBytesInvalidInverted(t *testing.T) {
+	t.Parallel()
+
+	bad := uint8(2)
+	enc := test.Filter{Issuers: []test.Issuer{{
+		SpkiHash:     testFilterIssuer,
+		Revoked:      [][]byte{testFilterSerial},
+		NotRevoked:   [][]byte{[]byte("good-serial")},
+		InvertedByte: &bad,
+	}}}.Bytes()
+	if _, err := FromBytes(enc); !errors.Is(err, ErrDeserialize) {
+		t.Fatalf("want ErrDeserialize, got %v", err)
+	}
+}
+
 var (
 	testFilterIssuer = IssuerSpkiHash{1, 2, 3}
 	testFilterLog    = LogId{9, 9, 9}
