@@ -2,12 +2,14 @@ package internal
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 )
 
 // On-disk layout of index.bin. Documented at
@@ -222,15 +224,20 @@ func validateLogDirOrder(logDir []byte, numLogs int) error {
 }
 
 // validateEntrySections checks every log directory entry's on-demand entry
-// section against the spec's bounds: it MUST lie entirely within the file and
-// MUST NOT overlap the header, filename table, or log directory.
+// section against the spec's bounds: it MUST lie entirely within the file,
+// MUST NOT overlap the header, filename table, or log directory, and SHOULD
+// NOT overlap another log's entry section.
 //
-// The lower bound (no overlap with the header/tables) and integer-overflow
-// safety are checked unconditionally. The upper bound (within the file) is
-// checked when the reader reports its size; otherwise a short read is still
-// caught at [Index.Lookup] time by readFullAt.
+// The lower bound (no overlap with the header/tables), the inter-section
+// overlap check, and integer-overflow safety are checked unconditionally.
+// The upper bound (within the file) is checked when the reader reports its
+// size; otherwise a short read is still caught at [Index.Lookup] time by
+// readFullAt.
 func validateEntrySections(r io.ReaderAt, logDir []byte, numLogs int, tablesEnd int64) error {
+	type span struct{ start, end int64 }
+
 	size, haveSize := readerSize(r)
+	spans := make([]span, 0, numLogs)
 	for i := range numLogs {
 		off := i * logDirEntrySize
 		entryOffset := int64(binary.BigEndian.Uint64(logDir[off+32 : off+40]))
@@ -246,6 +253,21 @@ func validateEntrySections(r io.ReaderAt, logDir []byte, numLogs int, tablesEnd 
 		if haveSize && entryOffset+sectionLen > size {
 			return fmt.Errorf("%w: entry section [%d, %d) exceeds file size %d",
 				errInvalidIndex, entryOffset, entryOffset+sectionLen, size)
+		}
+
+		if sectionLen > 0 {
+			spans = append(spans, span{start: entryOffset, end: entryOffset + sectionLen})
+		}
+	}
+
+	// The spec leaves overlap between distinct logs' entry sections
+	// unspecified and says implementations SHOULD reject it; aliased
+	// sections would make one log's entries silently double as another's.
+	slices.SortFunc(spans, func(a, b span) int { return cmp.Compare(a.start, b.start) })
+	for i := 1; i < len(spans); i++ {
+		if spans[i].start < spans[i-1].end {
+			return fmt.Errorf("%w: entry sections [%d, %d) and [%d, %d) overlap",
+				errInvalidIndex, spans[i-1].start, spans[i-1].end, spans[i].start, spans[i].end)
 		}
 	}
 
