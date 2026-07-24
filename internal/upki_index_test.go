@@ -311,6 +311,43 @@ func TestLogDirOrder(t *testing.T) {
 	})
 }
 
+// TestEntrySectionOverlap covers the inter-section overlap guard: distinct
+// logs' entry sections that alias the same file bytes (fully or partially)
+// are rejected at construction.
+func TestEntrySectionOverlap(t *testing.T) {
+	t.Parallel()
+
+	// Two logs, one 18-byte entry section each, packed contiguously after
+	// the tables by the builder.
+	logA := [32]byte{0xaa}
+	logB := [32]byte{0xbb}
+	enc := test.Index{Filters: []test.IndexFilter{
+		{Filename: "a.filter", Coverage: []test.Coverage{{LogId: logA, MinTimestamp: 100, MaxTimestamp: 200}}},
+		{Filename: "b.filter", Coverage: []test.Coverage{{LogId: logB, MinTimestamp: 100, MaxTimestamp: 200}}},
+	}}.Bytes()
+
+	// Log B's u64 section offset follows its 32-byte log id in the second
+	// log-dir entry. Log A's section begins right after the tables.
+	dirStart := headerSize + 2*filenameSize
+	offFieldB := dirStart + logDirEntrySize + 32
+	sectionA := uint64(dirStart + 2*logDirEntrySize)
+
+	for name, offsetB := range map[string]uint64{
+		"identical sections": sectionA,
+		"partial overlap":    sectionA + 9,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			bad := bytes.Clone(enc)
+			binary.BigEndian.PutUint64(bad[offFieldB:offFieldB+8], offsetB)
+			if _, err := NewIndexFromReader(bytes.NewReader(bad), nil); !errors.Is(err, errInvalidIndex) {
+				t.Fatalf("want errInvalidIndex, got %v", err)
+			}
+		})
+	}
+}
+
 // TestLookupCorruptEntries covers Lookup's error paths: an entry section
 // that can't be fully read, and an entry whose filter index exceeds the
 // filename table.
