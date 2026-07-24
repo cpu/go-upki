@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"slices"
 )
 
@@ -37,7 +36,7 @@ import (
 // it is not supported.
 const (
 	RevocationSubdir = "revocation"
-	indexFilename    = "index.bin"
+	IndexFilename    = "index.bin"
 	indexMagic       = "upkiidx1"
 	filenameSize     = 32 // NULL-padded filename slot, restricted ASCII
 
@@ -60,7 +59,7 @@ var errInvalidIndex = errors.New("upki: invalid index")
 // the log-id directory eagerly. Per-log entry sections are read on demand
 // via [io.ReaderAt.ReadAt] during [Index.Lookup].
 //
-// An Index may own a closer (e.g., an [*os.File] opened by [NewIndex]);
+// An Index may own a closer (e.g., a caller-supplied [*os.File]);
 // callers must release it with [Index.Close].
 //
 // Index is safe for concurrent [Index.Lookup] calls: after construction
@@ -73,29 +72,6 @@ type Index struct {
 	numLogs   int
 	r         io.ReaderAt
 	closer    io.Closer // nil if the caller supplied the ReaderAt
-}
-
-// NewIndex opens the cache dir's revocation index file and loads its
-// header and lookup tables.
-//
-// The returned Index keeps a file handle open for on-demand reads of
-// entry sections. Callers must call or defer [Index.Close] when done.
-func NewIndex(cacheDir string) (*Index, error) {
-	path := filepath.Join(cacheDir, RevocationSubdir, indexFilename)
-
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, fmt.Errorf("upki: opening index: %w", err)
-	}
-
-	idx, err := NewIndexFromReader(f, f)
-	if err != nil {
-		f.Close()
-
-		return nil, err
-	}
-
-	return idx, nil
 }
 
 // NewIndexFromReader builds an Index over a caller-supplied

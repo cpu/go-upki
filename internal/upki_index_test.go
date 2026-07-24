@@ -20,9 +20,9 @@ func TestLookupEmptyIndex(t *testing.T) {
 	t.Parallel()
 
 	cacheDir := writeCacheIndex(t, test.Index{}.Bytes())
-	idx, err := NewIndex(cacheDir)
+	idx, err := openCacheIndex(cacheDir)
 	if err != nil {
-		t.Fatalf("NewIndex: %v", err)
+		t.Fatalf("openCacheIndex: %v", err)
 	}
 	defer idx.Close()
 
@@ -50,9 +50,9 @@ func TestLookupNoMatchingLogID(t *testing.T) {
 	}}
 	cacheDir := writeCacheIndex(t, idxFile.Bytes())
 
-	idx, err := NewIndex(cacheDir)
+	idx, err := openCacheIndex(cacheDir)
 	if err != nil {
-		t.Fatalf("NewIndex: %v", err)
+		t.Fatalf("openCacheIndex: %v", err)
 	}
 	defer idx.Close()
 
@@ -80,9 +80,9 @@ func TestLookupNoMatchingTimestamp(t *testing.T) {
 	}}
 	cacheDir := writeCacheIndex(t, idxFile.Bytes())
 
-	idx, err := NewIndex(cacheDir)
+	idx, err := openCacheIndex(cacheDir)
 	if err != nil {
-		t.Fatalf("NewIndex: %v", err)
+		t.Fatalf("openCacheIndex: %v", err)
 	}
 	defer idx.Close()
 
@@ -117,9 +117,9 @@ func TestLookupHit(t *testing.T) {
 	}}
 	cacheDir := writeCacheIndex(t, idxFile.Bytes())
 
-	idx, err := NewIndex(cacheDir)
+	idx, err := openCacheIndex(cacheDir)
 	if err != nil {
-		t.Fatalf("NewIndex: %v", err)
+		t.Fatalf("openCacheIndex: %v", err)
 	}
 	defer idx.Close()
 
@@ -157,9 +157,9 @@ func TestLookupMultipleFilters(t *testing.T) {
 	}}
 	cacheDir := writeCacheIndex(t, idxFile.Bytes())
 
-	idx, err := NewIndex(cacheDir)
+	idx, err := openCacheIndex(cacheDir)
 	if err != nil {
-		t.Fatalf("NewIndex: %v", err)
+		t.Fatalf("openCacheIndex: %v", err)
 	}
 	defer idx.Close()
 
@@ -224,9 +224,9 @@ func TestLookupConcurrent(t *testing.T) {
 	}
 	cacheDir := writeCacheIndex(t, idxFile.Bytes())
 
-	idx, err := NewIndex(cacheDir)
+	idx, err := openCacheIndex(cacheDir)
 	if err != nil {
-		t.Fatalf("NewIndex: %v", err)
+		t.Fatalf("openCacheIndex: %v", err)
 	}
 	defer idx.Close()
 
@@ -624,7 +624,7 @@ func TestInvalidMagic(t *testing.T) {
 	t.Parallel()
 
 	cacheDir := writeCacheIndex(t, []byte("wrongmag\x00\x00\x00\x00\x00"))
-	_, err := NewIndex(cacheDir)
+	_, err := openCacheIndex(cacheDir)
 	if !errors.Is(err, errInvalidIndex) {
 		t.Fatalf("want errInvalidIndex, got %v", err)
 	}
@@ -634,7 +634,7 @@ func TestTruncatedAfterMagic(t *testing.T) {
 	t.Parallel()
 
 	cacheDir := writeCacheIndex(t, []byte(indexMagic))
-	_, err := NewIndex(cacheDir)
+	_, err := openCacheIndex(cacheDir)
 	if !errors.Is(err, errInvalidIndex) {
 		t.Fatalf("want errInvalidIndex, got %v", err)
 	}
@@ -644,7 +644,7 @@ func TestTruncatedBeforeMagic(t *testing.T) {
 	t.Parallel()
 
 	cacheDir := writeCacheIndex(t, []byte("upki"))
-	_, err := NewIndex(cacheDir)
+	_, err := openCacheIndex(cacheDir)
 	if !errors.Is(err, errInvalidIndex) {
 		t.Fatalf("want errInvalidIndex, got %v", err)
 	}
@@ -657,10 +657,29 @@ func TestMissingIndex(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(cacheDir, RevocationSubdir), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	_, err := NewIndex(cacheDir)
+	_, err := openCacheIndex(cacheDir)
 	if !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("want os.ErrNotExist, got %v", err)
 	}
+}
+
+// openCacheIndex mirrors the upki package's production open path: the
+// cache dir's revocation index.bin is opened and an Index built over the
+// resulting file handle.
+func openCacheIndex(cacheDir string) (*Index, error) {
+	f, err := os.Open(filepath.Join(cacheDir, RevocationSubdir, IndexFilename))
+	if err != nil {
+		return nil, err
+	}
+
+	idx, err := NewIndexFromReader(f, f)
+	if err != nil {
+		f.Close()
+
+		return nil, err
+	}
+
+	return idx, nil
 }
 
 func writeCacheIndex(t *testing.T, data []byte) string {
@@ -672,7 +691,7 @@ func writeCacheIndex(t *testing.T, data []byte) string {
 		t.Fatal(err)
 	}
 
-	if err := os.WriteFile(filepath.Join(revDir, indexFilename), data, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(revDir, IndexFilename), data, 0o644); err != nil {
 		t.Fatal(err)
 	}
 
