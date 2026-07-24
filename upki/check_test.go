@@ -478,7 +478,7 @@ func TestCheckerCheckFilterLoadedOnce(t *testing.T) {
 	idx := test.Index{Filters: []test.IndexFilter{{Filename: "shared.filter", Coverage: coverage}}}
 
 	opener := &countingOpener{files: map[string][]byte{"shared.filter": filterBytes}, opens: map[string]int{}}
-	c, err := NewCheckerWith(readerAtNopCloser{bytes.NewReader(idx.Bytes())}, opener)
+	c, err := NewCheckerWith(staticIndex(idx.Bytes()), opener)
 	if err != nil {
 		t.Fatalf("NewCheckerWith: %v", err)
 	}
@@ -516,6 +516,236 @@ func (o *countingOpener) Open(filename string) (io.ReadCloser, error) {
 	}
 
 	return io.NopCloser(bytes.NewReader(data)), nil
+}
+
+// TestCheckerReopensIndexFromDisk exercises the cache-atomicity retry
+// end to end on the filesystem: a cache update replaces index.bin and
+// removes an old filter file while the Checker holds the old index, and
+// the next check transparently reopens and answers from the new state.
+func TestCheckerReopensIndexFromDisk(t *testing.T) {
+	t.Parallel()
+
+	logA := fillLogID(0x11)
+	issuer := newTestCert(t, nil, nil)
+	issuerHash := sha256.Sum256(issuer.RawSubjectPublicKeyInfo)
+
+	covA := []test.Coverage{{LogId: logA, MinTimestamp: 0, MaxTimestamp: 2000}}
+	filterBytes := test.Filter{
+		Issuers:  []test.Issuer{{SpkiHash: issuerHash, Revoked: [][]byte{{42}}}},
+		Coverage: covA,
+	}.Bytes()
+
+	cacheDir := writeTestCache(t,
+		test.Index{Filters: []test.IndexFilter{{Filename: "old.filter", Coverage: covA}}},
+		map[string][]byte{"old.filter": filterBytes},
+	)
+	c, err := NewChecker(cacheDir)
+	if err != nil {
+		t.Fatalf("NewChecker: %v", err)
+	}
+	defer c.Close()
+
+	ext := buildSCTExtension(t, []SCT{{LogID: logA, Timestamp: 1000}})
+	chain := []*x509.Certificate{newTestCert(t, big.NewInt(42), ext), issuer}
+
+	// Sanity: the pre-update cache answers conclusively.
+	status, err := c.Check(chain)
+	if err != nil || status != StatusRevoked {
+		t.Fatalf("pre-update Check = %v, %v, want StatusRevoked, nil", status, err)
+	}
+
+	// Simulate a cache update in the spec's required order: new filter
+	// bytes first, then the index referencing them, then removal of the
+	// filter the new index no longer references.
+	revDir := filepath.Join(cacheDir, internal.RevocationSubdir)
+	if err := os.WriteFile(filepath.Join(revDir, "new.filter"), filterBytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	newIdx := test.Index{Filters: []test.IndexFilter{{Filename: "new.filter", Coverage: covA}}}
+	if err := os.WriteFile(filepath.Join(revDir, "index.bin"), newIdx.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(revDir, "old.filter")); err != nil {
+		t.Fatal(err)
+	}
+
+	// The held index still names old.filter; Check must reopen and
+	// answer from new.filter rather than surfacing the missing file.
+	status, err = c.Check(chain)
+	if err != nil {
+		t.Fatalf("post-update Check: %v", err)
+	}
+	if status != StatusRevoked {
+		t.Errorf("post-update Check = %v, want StatusRevoked", status)
+	}
+}
+
+// countingIndexOpener serves successive in-memory index snapshots,
+// recording how many times it was opened. Opens beyond the last
+// snapshot reuse the final one.
+type countingIndexOpener struct {
+	opens     int
+	snapshots [][]byte
+}
+
+func (o *countingIndexOpener) OpenIndex() (IndexReader, error) {
+	i := min(o.opens, len(o.snapshots)-1)
+	o.opens++
+
+	return readerAtNopCloser{bytes.NewReader(o.snapshots[i])}, nil
+}
+
+// TestCheckerIndexReopen covers the retry decision points around a
+// superseded index: a successful reopen resolves the check, retries are
+// bounded when the cache never heals, a failed reopen surfaces its
+// error, and filter errors other than not-exist don't trigger a reopen.
+func TestCheckerIndexReopen(t *testing.T) {
+	t.Parallel()
+
+	logA := fillLogID(0x11)
+	issuer := newTestCert(t, nil, nil)
+	issuerHash := sha256.Sum256(issuer.RawSubjectPublicKeyInfo)
+
+	covA := []test.Coverage{{LogId: logA, MinTimestamp: 0, MaxTimestamp: 2000}}
+	filterBytes := test.Filter{
+		Issuers:  []test.Issuer{{SpkiHash: issuerHash, Revoked: [][]byte{{42}}}},
+		Coverage: covA,
+	}.Bytes()
+	idxNaming := func(filename string) []byte {
+		return test.Index{Filters: []test.IndexFilter{{Filename: filename, Coverage: covA}}}.Bytes()
+	}
+
+	ext := buildSCTExtension(t, []SCT{{LogID: logA, Timestamp: 1000}})
+	chain := []*x509.Certificate{newTestCert(t, big.NewInt(42), ext), issuer}
+
+	t.Run("superseded index reopened once", func(t *testing.T) {
+		t.Parallel()
+
+		// The construction-time index names f1, which is gone; the
+		// reopened index names f2, which is present.
+		indexes := &countingIndexOpener{snapshots: [][]byte{idxNaming("f1.filter"), idxNaming("f2.filter")}}
+		filters := &countingOpener{files: map[string][]byte{"f2.filter": filterBytes}, opens: map[string]int{}}
+		c, err := NewCheckerWith(indexes, filters)
+		if err != nil {
+			t.Fatalf("NewCheckerWith: %v", err)
+		}
+		defer c.Close()
+
+		status, err := c.Check(chain)
+		if err != nil {
+			t.Fatalf("Check: %v", err)
+		}
+		if status != StatusRevoked {
+			t.Errorf("Check = %v, want StatusRevoked", status)
+		}
+		if indexes.opens != 2 {
+			t.Errorf("index opened %d times, want 2 (construction + one reopen)", indexes.opens)
+		}
+	})
+
+	t.Run("reopens are bounded", func(t *testing.T) {
+		t.Parallel()
+
+		// Every index snapshot names a filter that never exists, so the
+		// check gives up after maxIndexReopens reopens.
+		indexes := &countingIndexOpener{snapshots: [][]byte{idxNaming("f1.filter")}}
+		filters := &countingOpener{files: nil, opens: map[string]int{}}
+		c, err := NewCheckerWith(indexes, filters)
+		if err != nil {
+			t.Fatalf("NewCheckerWith: %v", err)
+		}
+		defer c.Close()
+
+		status, err := c.Check(chain)
+		if !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("Check error = %v, want os.ErrNotExist", err)
+		}
+		if status != StatusNotCovered {
+			t.Errorf("Check = %v, want StatusNotCovered", status)
+		}
+		if want := 1 + maxIndexReopens; indexes.opens != want {
+			t.Errorf("index opened %d times, want %d (construction + bounded reopens)", indexes.opens, want)
+		}
+	})
+
+	t.Run("reopen failure surfaces", func(t *testing.T) {
+		t.Parallel()
+
+		reopenErr := errors.New("index gone")
+		opens := 0
+		indexes := IndexOpenerFunc(func() (IndexReader, error) {
+			opens++
+			if opens > 1 {
+				return nil, reopenErr
+			}
+
+			return readerAtNopCloser{bytes.NewReader(idxNaming("f1.filter"))}, nil
+		})
+		filters := &countingOpener{files: nil, opens: map[string]int{}}
+		c, err := NewCheckerWith(indexes, filters)
+		if err != nil {
+			t.Fatalf("NewCheckerWith: %v", err)
+		}
+		defer c.Close()
+
+		status, err := c.Check(chain)
+		if !errors.Is(err, reopenErr) {
+			t.Fatalf("Check error = %v, want it to wrap the reopen failure", err)
+		}
+		if status != StatusNotCovered {
+			t.Errorf("Check = %v, want StatusNotCovered", status)
+		}
+	})
+
+	t.Run("no reopen for other filter errors", func(t *testing.T) {
+		t.Parallel()
+
+		// The named filter exists but does not parse: not evidence of a
+		// superseded index, so the error surfaces without a reopen.
+		indexes := &countingIndexOpener{snapshots: [][]byte{idxNaming("f1.filter")}}
+		filters := &countingOpener{files: map[string][]byte{"f1.filter": []byte("not a clubcard")}, opens: map[string]int{}}
+		c, err := NewCheckerWith(indexes, filters)
+		if err != nil {
+			t.Fatalf("NewCheckerWith: %v", err)
+		}
+		defer c.Close()
+
+		if _, err := c.Check(chain); err == nil {
+			t.Fatal("Check succeeded, want filter parse error")
+		}
+		if indexes.opens != 1 {
+			t.Errorf("index opened %d times, want 1 (construction only)", indexes.opens)
+		}
+	})
+}
+
+// TestCheckerCheckAfterClose confirms Close is idempotent and a check
+// begun after Close reports an error rather than dereferencing the
+// released index.
+func TestCheckerCheckAfterClose(t *testing.T) {
+	t.Parallel()
+
+	logA := fillLogID(0x11)
+	enc := test.Index{Filters: []test.IndexFilter{
+		{Filename: "t.filter", Coverage: []test.Coverage{{LogId: logA, MinTimestamp: 0, MaxTimestamp: 2000}}},
+	}}.Bytes()
+	c, err := NewCheckerWith(staticIndex(enc), nil)
+	if err != nil {
+		t.Fatalf("NewCheckerWith: %v", err)
+	}
+
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatalf("second Close: %v", err)
+	}
+
+	ext := buildSCTExtension(t, []SCT{{LogID: logA, Timestamp: 1000}})
+	chain := []*x509.Certificate{newTestCert(t, big.NewInt(1), ext), newTestCert(t, nil, nil)}
+	if _, err := c.Check(chain); !errors.Is(err, errCheckerClosed) {
+		t.Fatalf("Check error = %v, want errCheckerClosed", err)
+	}
 }
 
 // TestCheckerCheckMalformedSerial confirms Check surfaces a RawSerial
@@ -558,7 +788,7 @@ func TestCheckerCheckIndexLookupError(t *testing.T) {
 	}}.Bytes()
 	// Chop into the trailing 17-byte entry so Lookup's entry-section
 	// read comes up short.
-	c, err := NewCheckerWith(readerAtNopCloser{bytes.NewReader(enc[:len(enc)-5])}, nil)
+	c, err := NewCheckerWith(staticIndex(enc[:len(enc)-5]), nil)
 	if err != nil {
 		t.Fatalf("NewCheckerWith: %v", err)
 	}
@@ -640,7 +870,7 @@ func TestNewCheckerWith(t *testing.T) {
 	cacheDir := writeTestCache(t, idx, map[string][]byte{"t.filter": filterBytes})
 
 	c, err := NewCheckerWith(
-		readerAtNopCloser{bytes.NewReader(idx.Bytes())},
+		staticIndex(idx.Bytes()),
 		DirOpener{Dir: filepath.Join(cacheDir, internal.RevocationSubdir)},
 	)
 	if err != nil {
@@ -664,7 +894,7 @@ func TestNewCheckerWith(t *testing.T) {
 func TestNewCheckerWithInvalidIndex(t *testing.T) {
 	t.Parallel()
 
-	_, err := NewCheckerWith(readerAtNopCloser{bytes.NewReader([]byte("junk"))}, nil)
+	_, err := NewCheckerWith(staticIndex([]byte("junk")), nil)
 	if err == nil {
 		t.Fatal("NewCheckerWith succeeded on junk index, want error")
 	}
@@ -687,6 +917,14 @@ func TestCheckMissingCache(t *testing.T) {
 type readerAtNopCloser struct{ io.ReaderAt }
 
 func (readerAtNopCloser) Close() error { return nil }
+
+// staticIndex adapts in-memory index bytes to an IndexOpener whose
+// every open returns a fresh reader over the same snapshot.
+func staticIndex(enc []byte) IndexOpener {
+	return IndexOpenerFunc(func() (IndexReader, error) {
+		return readerAtNopCloser{bytes.NewReader(enc)}, nil
+	})
+}
 
 // writeTestCache lays out a temp upki cache dir holding idx as its
 // revocation index.bin plus the given filter files (basename -> bytes).
