@@ -19,7 +19,7 @@ import (
 //	  num_log_ids:   u32 BE
 //
 //	TABLES (read eagerly):
-//	  filename[num_filenames]:   [32]byte  UTF-8, NULL-padded
+//	  filename[num_filenames]:   [32]byte  restricted ASCII, NULL-padded
 //	  log_dir[num_log_ids]:                sorted lexicographically by log_id
 //	    log_id:      [32]byte
 //	    offset:      u64 BE                file offset of entry section
@@ -37,7 +37,7 @@ const (
 	RevocationSubdir = "revocation"
 	indexFilename    = "index.bin"
 	indexMagic       = "upkiidx1"
-	filenameSize     = 32 // NULL-padded UTF-8 filename slot
+	filenameSize     = 32 // NULL-padded filename slot, restricted ASCII
 
 	headerSize      = 8 + 2 + 4  // 8 byte magic + num_filenames(u16) + num_log_ids(u32)
 	logDirEntrySize = 32 + 8 + 2 // 32 byte log_id + entry-section offset(u64) + count(u16)
@@ -145,7 +145,12 @@ func NewIndexFromReader(r io.ReaderAt, closer io.Closer) (*Index, error) {
 			end = filenameSize
 		}
 
-		filenames[i] = string(slot[:end])
+		name := string(slot[:end])
+		if err := validateFilterFilename(name); err != nil {
+			return nil, fmt.Errorf("%w: filename table entry %d: %w", errInvalidIndex, i, err)
+		}
+
+		filenames[i] = name
 	}
 
 	if err := validateLogDirOrder(logDir, numLogs); err != nil {
@@ -164,6 +169,34 @@ func NewIndexFromReader(r io.ReaderAt, closer io.Closer) (*Index, error) {
 		r:         r,
 		closer:    closer,
 	}, nil
+}
+
+// validateFilterFilename enforces the spec's filter filename restrictions:
+// 1 to 32 bytes, only ASCII `A`-`Z`, `a`-`z`, `0`-`9`, `-`, `.`, and `_`,
+// and never the names "." or "..".
+//
+// Filenames from the index are used to open filter files relative to the
+// cache directory, so this must reject anything that could escape it (path
+// separators, "..", NUL is already excluded by slot parsing) before any
+// name reaches a filesystem operation. An index containing a violating
+// name is malformed.
+func validateFilterFilename(name string) error {
+	if len(name) == 0 {
+		return errors.New("empty filename")
+	}
+	if name == "." || name == ".." {
+		return fmt.Errorf("filename %q is a directory reference", name)
+	}
+	for i := 0; i < len(name); i++ {
+		switch c := name[i]; {
+		case c >= 'A' && c <= 'Z', c >= 'a' && c <= 'z', c >= '0' && c <= '9',
+			c == '-', c == '.', c == '_':
+		default:
+			return fmt.Errorf("filename contains disallowed byte 0x%02x", c)
+		}
+	}
+
+	return nil
 }
 
 // validateLogDirOrder checks that the log directory is strictly ascending by
