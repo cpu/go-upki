@@ -8,8 +8,9 @@ CLI for revocation checking in the Go ecosystem, without requiring
 [rustls/upki-go-demo][rustls-upki-go-demo] for an example of this approach).
 
 Fetching filter data (and creating new filters from revocation
-information) is out-of-scope. Only the 
-[V4 upki-revocation data format][upki-revocation] is supported.
+information) is out-of-scope. Only the V4 clubcard filter format, and the
+"upkiidx1" index file format from the [v1.0.0 upki-revocation][upki-revocation]
+specification are supported.
 
 A place to experiment with API design before proposing a path towards
 built-in stdlib support in `crypto/tls`.
@@ -54,6 +55,6 @@ checks one certificate against one filter file.
 
 [upki]: https://github.com/rustls/upki
 [rustls-upki-go-demo]: https://github.com/rustls/upki-go-demo
-[upki-revocation]: https://c2sp.org/upki-revocation@latest
+[upki-revocation]: https://c2sp.org/upki-revocation@v1.0.0
 [vpc]: https://pkg.go.dev/crypto/tls#Config.VerifyPeerCertificate
 [paper]: https://ieeexplore.ieee.org/document/11023370
