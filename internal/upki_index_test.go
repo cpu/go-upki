@@ -432,6 +432,64 @@ func TestFilenameFillsSlot(t *testing.T) {
 	}
 }
 
+// TestFilenameValidation covers the spec's filter filename restrictions:
+// names are 1 to 32 bytes of ASCII [A-Za-z0-9.-_] and never "." or "..".
+// An index carrying a violating name is rejected at construction, before
+// any name can reach a filesystem operation relative to the cache dir.
+func TestFilenameValidation(t *testing.T) {
+	t.Parallel()
+
+	id, _ := testInput()
+	encode := func(name string) []byte {
+		return test.Index{Filters: []test.IndexFilter{
+			{Filename: name, Coverage: []test.Coverage{
+				{LogId: id, MinTimestamp: 500, MaxTimestamp: 1500},
+			}},
+		}}.Bytes()
+	}
+
+	bad := []string{
+		"",                   // below the 1-byte minimum
+		".",                  // current-directory reference
+		"..",                 // parent-directory reference
+		"../evil.filter",     // path traversal
+		"..\\evil.filter",    // windows path traversal
+		"a/b.filter",         // path separator
+		"/etc/passwd",        // absolute path
+		"sp ace.filter",      // disallowed ASCII (space)
+		"tab\t.filter",       // disallowed ASCII (control)
+		"caf\xc3\xa9.filter", // non-ASCII (UTF-8 é)
+		"high\xff.filter",    // non-ASCII (high byte)
+	}
+	for _, name := range bad {
+		t.Run(fmt.Sprintf("reject %q", name), func(t *testing.T) {
+			t.Parallel()
+
+			if _, err := NewIndexFromReader(bytes.NewReader(encode(name)), nil); !errors.Is(err, errInvalidIndex) {
+				t.Fatalf("want errInvalidIndex, got %v", err)
+			}
+		})
+	}
+
+	good := []string{
+		"a",         // minimum length
+		"...",       // only exactly "." and ".." are reserved
+		"..hidden",  // leading dots are otherwise fine
+		"AZaz09-._", // the full allowed character classes
+	}
+	for _, name := range good {
+		t.Run(fmt.Sprintf("accept %q", name), func(t *testing.T) {
+			t.Parallel()
+
+			idx, err := NewIndexFromReader(bytes.NewReader(encode(name)), nil)
+			if err != nil {
+				t.Fatalf("NewIndexFromReader: %v", err)
+			}
+			idx.Close()
+		})
+	}
+}
+
 // TestReaderAtContractVariants exercises the io.ReaderAt behaviors the
 // index must tolerate from custom backends: a reader that reports
 // io.EOF alongside a full read ending exactly at EOF (permitted by the
