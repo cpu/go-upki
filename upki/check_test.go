@@ -339,6 +339,125 @@ func TestCheckerCheckAggregation(t *testing.T) {
 	}
 }
 
+// TestCheckerCheckInconsistentIndex covers the index/filter coverage
+// disagreement rule: when every filter the index selects reports that it
+// covers none of the leaf's SCTs, Check surfaces ErrInconsistentIndex
+// instead of a silent StatusNotCovered. Any filter that can answer (even
+// just "not enrolled") suppresses the error.
+func TestCheckerCheckInconsistentIndex(t *testing.T) {
+	t.Parallel()
+
+	logA, logB := fillLogID(0x11), fillLogID(0x22)
+	issuer := newTestCert(t, nil, nil)
+	otherIssuer := newTestCert(t, nil, nil)
+	issuerHash := sha256.Sum256(issuer.RawSubjectPublicKeyInfo)
+	otherHash := sha256.Sum256(otherIssuer.RawSubjectPublicKeyInfo)
+
+	covA := test.Coverage{LogId: logA, MinTimestamp: 0, MaxTimestamp: 2000}
+	covB := test.Coverage{LogId: logB, MinTimestamp: 0, MaxTimestamp: 2000}
+	// A log A interval disjoint from the SCT timestamps used below: a
+	// filter carrying it contradicts an index entry claiming covA.
+	covALate := test.Coverage{LogId: logA, MinTimestamp: 3000, MaxTimestamp: 4000}
+
+	filter := func(spki [32]byte, cov ...test.Coverage) []byte {
+		return test.Filter{
+			Issuers:  []test.Issuer{{SpkiHash: spki, Revoked: [][]byte{{42}}, NotRevoked: [][]byte{{43}}}},
+			Coverage: cov,
+		}.Bytes()
+	}
+
+	tests := []struct {
+		name    string
+		idx     test.Index
+		files   map[string][]byte
+		serial  int64
+		scts    []SCT
+		want    Status
+		wantErr error
+	}{
+		{
+			// The index's only selected filter disavows the SCT.
+			name: "single filter disagrees",
+			idx: test.Index{Filters: []test.IndexFilter{
+				{Filename: "f0.filter", Coverage: []test.Coverage{covA}},
+			}},
+			files:   map[string][]byte{"f0.filter": filter(issuerHash, covALate)},
+			serial:  42,
+			scts:    []SCT{{LogID: logA, Timestamp: 1000}},
+			want:    StatusNotCovered,
+			wantErr: ErrInconsistentIndex,
+		},
+		{
+			name: "every filter disagrees",
+			idx: test.Index{Filters: []test.IndexFilter{
+				{Filename: "f0.filter", Coverage: []test.Coverage{covA}},
+				{Filename: "f1.filter", Coverage: []test.Coverage{covB}},
+			}},
+			files: map[string][]byte{
+				"f0.filter": filter(issuerHash, covALate),
+				"f1.filter": filter(issuerHash, covALate),
+			},
+			serial:  42,
+			scts:    []SCT{{LogID: logA, Timestamp: 1000}, {LogID: logB, Timestamp: 1000}},
+			want:    StatusNotCovered,
+			wantErr: ErrInconsistentIndex,
+		},
+		{
+			// A not-enrolled answer still confirms the filter covers the
+			// SCTs, so one contradicting filter is tolerated.
+			name: "not enrolled filter suppresses the error",
+			idx: test.Index{Filters: []test.IndexFilter{
+				{Filename: "f0.filter", Coverage: []test.Coverage{covA}},
+				{Filename: "f1.filter", Coverage: []test.Coverage{covB}},
+			}},
+			files: map[string][]byte{
+				"f0.filter": filter(issuerHash, covALate),
+				"f1.filter": filter(otherHash, covB),
+			},
+			serial:  42,
+			scts:    []SCT{{LogID: logA, Timestamp: 1000}, {LogID: logB, Timestamp: 1000}},
+			want:    StatusNotCovered,
+			wantErr: nil,
+		},
+		{
+			name: "conclusive filter suppresses the error",
+			idx: test.Index{Filters: []test.IndexFilter{
+				{Filename: "f0.filter", Coverage: []test.Coverage{covA}},
+				{Filename: "f1.filter", Coverage: []test.Coverage{covB}},
+			}},
+			files: map[string][]byte{
+				"f0.filter": filter(issuerHash, covALate),
+				"f1.filter": filter(issuerHash, covB),
+			},
+			serial:  43,
+			scts:    []SCT{{LogID: logA, Timestamp: 1000}, {LogID: logB, Timestamp: 1000}},
+			want:    StatusNotRevoked,
+			wantErr: nil,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			c, err := NewChecker(writeTestCache(t, tc.idx, tc.files))
+			if err != nil {
+				t.Fatalf("NewChecker: %v", err)
+			}
+			defer c.Close()
+
+			ext := buildSCTExtension(t, tc.scts)
+			chain := []*x509.Certificate{newTestCert(t, big.NewInt(tc.serial), ext), issuer}
+			status, err := c.Check(chain)
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("Check error = %v, want %v", err, tc.wantErr)
+			}
+			if status != tc.want {
+				t.Errorf("Check = %v, want %v", status, tc.want)
+			}
+		})
+	}
+}
+
 // TestCheckerCheckFilterLoadedOnce confirms Check reads a filter file at
 // most once, even when it covers several of the leaf's SCTs.
 func TestCheckerCheckFilterLoadedOnce(t *testing.T) {
