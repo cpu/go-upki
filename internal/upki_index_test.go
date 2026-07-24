@@ -366,6 +366,33 @@ func TestLookupCorruptEntries(t *testing.T) {
 		}
 	})
 
+	t.Run("filter index out of range in non-matching entry", func(t *testing.T) {
+		t.Parallel()
+
+		// Two entries for the probed log: the first matches the probe
+		// timestamp, the second does not. Corrupting the second entry's
+		// filter_idx must still fail the lookup: the spec treats any
+		// out-of-range filter_idx as rendering the file malformed, not
+		// just indices the query happens to resolve.
+		bad := test.Index{Filters: []test.IndexFilter{
+			{Filename: "test.filter", Coverage: []test.Coverage{
+				{LogId: id, MinTimestamp: 500, MaxTimestamp: 1500},
+				{LogId: id, MinTimestamp: 2000, MaxTimestamp: 3000},
+			}},
+		}}.Bytes()
+		// The non-matching entry is the section's (and file's) last 18
+		// bytes; its leading filter_idx(u16) high byte alone puts the
+		// index far past the one-slot filename table.
+		bad[len(bad)-18] = 0xff
+		idx, err := NewIndexFromReader(bytes.NewReader(bad), nil)
+		if err != nil {
+			t.Fatalf("NewIndexFromReader: %v", err)
+		}
+		if _, err := idx.Lookup(id, ts); !errors.Is(err, errInvalidIndex) {
+			t.Fatalf("want errInvalidIndex, got %v", err)
+		}
+	})
+
 	t.Run("entry section offset overlaps tables", func(t *testing.T) {
 		t.Parallel()
 
