@@ -324,14 +324,17 @@ func (idx *Index) Lookup(logID [32]byte, timestamp uint64) ([]string, error) {
 		// entry is: filter_idx(u16) | min_ts(u64) | max_ts(u64).
 		off := i * entrySize
 		filterIdx := int(binary.BigEndian.Uint16(buf[off : off+2]))
+		// The spec makes an out-of-range filter_idx render the whole file
+		// malformed, so every entry in the section is checked, including
+		// entries whose interval does not match the queried timestamp.
+		if filterIdx >= len(idx.filenames) {
+			return nil, fmt.Errorf("%w: entry filter index %d out of range", errInvalidIndex, filterIdx)
+		}
+
 		minTS := binary.BigEndian.Uint64(buf[off+2 : off+10])
 		maxTS := binary.BigEndian.Uint64(buf[off+10 : off+18])
 		if minTS > timestamp || timestamp > maxTS {
 			continue
-		}
-
-		if filterIdx >= len(idx.filenames) {
-			return nil, fmt.Errorf("%w: entry filter index %d out of range", errInvalidIndex, filterIdx)
 		}
 
 		filenames = append(filenames, idx.filenames[filterIdx])
