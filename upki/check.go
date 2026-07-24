@@ -134,6 +134,10 @@ func (c *Checker) Close() error {
 // [StatusNotCovered]. Each distinct filter file is opened and parsed
 // at most once per Check call.
 //
+// If every filter the index selects turns out not to cover any of the
+// leaf's SCTs, the index and filter files contradict each other and
+// Check returns [StatusNotCovered] with [ErrInconsistentIndex].
+//
 // Note that the signature on the leaf is not re-verified and Check
 // trusts the caller has already done that. This is designed to be used
 // in a context like a [tls.Config.VerifyPeerCertificate] callback
@@ -167,6 +171,7 @@ func (c *Checker) Check(chain []*x509.Certificate) (Status, error) {
 	// filters already queried. Contains probes every timestamp, so a
 	// second query of the same filter can't answer differently.
 	notRevoked := false
+	queried, notCovered := 0, 0
 	seen := make(map[string]bool)
 	for _, s := range scts {
 		filenames, err := c.idx.Lookup(s.LogID, uint64(s.Timestamp))
@@ -184,6 +189,7 @@ func (c *Checker) Check(chain []*x509.Certificate) (Status, error) {
 			if err != nil {
 				return StatusNotCovered, err
 			}
+			queried++
 			switch status {
 			case crlite.StatusRevoked:
 				return StatusRevoked, nil
@@ -191,10 +197,14 @@ func (c *Checker) Check(chain []*x509.Certificate) (Status, error) {
 				// Conclusive, but a later filter may still revoke. Remember
 				// the result but keep looking.
 				notRevoked = true
+			case crlite.StatusNotCovered:
+				// The index claimed this filter covers one of the leaf's
+				// SCTs but the filter's own coverage disagrees. Tolerated
+				// unless every covering filter is in the same state.
+				notCovered++
 			default:
-				// StatusNotCovered and StatusNotEnrolled both mean the
-				// filter couldn't answer for this issuer or these
-				// timestamps. Keep looking.
+				// StatusNotEnrolled means the filter couldn't answer for
+				// this issuer. Keep looking.
 			}
 		}
 	}
@@ -202,9 +212,20 @@ func (c *Checker) Check(chain []*x509.Certificate) (Status, error) {
 	if notRevoked {
 		return StatusNotRevoked, nil
 	}
+	if queried > 0 && notCovered == queried {
+		return StatusNotCovered, ErrInconsistentIndex
+	}
 
 	return StatusNotCovered, nil
 }
+
+// ErrInconsistentIndex is returned by [Check] and [Checker.Check] when the
+// index selected covering filters for the leaf's SCTs but every selected
+// filter reported that it covers none of them. The index and the filter
+// files disagree about coverage, so the cache can't be trusted to answer
+// and the disagreement surfaces as an error rather than a silent
+// [StatusNotCovered].
+var ErrInconsistentIndex = errors.New("upki: index and filters disagree: no selected filter covers the leaf's SCTs")
 
 // queryFilter loads and parses the named filter file, then evaluates
 // the (key, timestamps) membership query against it.
