@@ -1,7 +1,7 @@
 // Integration tests requiring a populated upki revocation cache dir.
 //
 // Tests in this file are skipped unless UPKI_CACHE_DIR is set.
-// CI populates it by running upki fetch + tools/crlite-reencode.
+// CI populates it by running `upki fetch` against the public rustls mirror.
 package upki_test
 
 import (

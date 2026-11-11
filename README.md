@@ -48,6 +48,21 @@ file directly, without the cache/index machinery. See
 [`cmd/crlite-query`](./cmd/crlite-query) for a small example that
 checks one certificate against one filter file.
 
+## Testing
+
+`go test ./...` runs the unit tests. The integration tests in the
+[`upki`](./upki) package additionally need a real cache populated by
+[`upki fetch`][upki] and are skipped unless `UPKI_CACHE_DIR` points at
+the `cache-dir` reported by `upki show-config`:
+
+```sh
+upki fetch
+UPKI_CACHE_DIR=<cache-dir> go test ./...
+```
+
+CI does the same with a pinned `upki-cli` release against the public
+`https://upki.rustls.dev/revocation/` mirror.
+
 ## References
 
 - [Clubcards for the WebPKI][paper], J. M. Schanck, IEEE S&P 2025.
