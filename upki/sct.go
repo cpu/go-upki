@@ -17,6 +17,9 @@ import (
 // Returns (nil, nil) when the extension is absent. A cert with no
 // embedded SCTs simply has no CRLite coverage signal.
 //
+// Entries using unknown SCT versions are ignored. Each entry is length
+// prefixed, so later entries can still be parsed safely.
+//
 // ErrMalformedSCTExtension is returned if the extension is present but
 // malformed.
 //
@@ -70,8 +73,11 @@ func EmbeddedSCTs(cert *x509.Certificate) ([]SCT, error) {
 		//	} SignedCertificateTimestamp;
 
 		var version uint8
-		if !serialized.ReadUint8(&version) || version != 0 {
-			return nil, fmt.Errorf("%w: unsupported sct version", ErrMalformedSCTExtension)
+		if !serialized.ReadUint8(&version) {
+			return nil, fmt.Errorf("%w: sct version", ErrMalformedSCTExtension)
+		}
+		if version != 0 {
+			continue
 		}
 
 		var s SCT
