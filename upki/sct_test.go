@@ -59,27 +59,12 @@ func TestEmbeddedSCTsRoundTrip(t *testing.T) {
 func TestEmbeddedSCTsMalformed(t *testing.T) {
 	t.Parallel()
 
-	// SerializedSCT carrying an unsupported version byte (0x01 instead
-	// of 0x00). Layout: version(1) + log_id(32) + timestamp(8) +
-	// extensions length-prefix(2) = 43 bytes.
-	badSCT := make([]byte, 43)
-	badSCT[0] = 0x01
-
-	var badSCTLen [2]byte
-	binary.BigEndian.PutUint16(badSCTLen[:], uint16(len(badSCT)))
-
-	var listLen [2]byte
-	binary.BigEndian.PutUint16(listLen[:], uint16(len(badSCT)+2))
-
-	innerWithBadVersion := append(listLen[:], badSCTLen[:]...)
-	innerWithBadVersion = append(innerWithBadVersion, badSCT...)
-
 	cases := []struct {
 		name string
 		ext  []byte
 	}{
 		{"truncated outer octet string", []byte{0x04, 0x05, 0x00}}, // claims 5 bytes, gives 1
-		{"bad sct version", wrapInOctetString(t, innerWithBadVersion)},
+		{"truncated v1 sct", buildSerializedSCTExtension(t, []byte{0x00}).Value},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -95,6 +80,29 @@ func TestEmbeddedSCTsMalformed(t *testing.T) {
 				t.Fatalf("want ErrMalformedSCTExtension, got %v", err)
 			}
 		})
+	}
+}
+
+func TestEmbeddedSCTsIgnoresUnknownVersions(t *testing.T) {
+	t.Parallel()
+
+	want := []SCT{
+		{LogID: fillLogID(0x11), Timestamp: 1700000000000},
+		{LogID: fillLogID(0x22), Timestamp: 1700000123456},
+	}
+	ext := buildSerializedSCTExtension(t,
+		encodeTestSCT(want[0]),
+		[]byte{0x01, 0x07, 0x00, 0x00, 0x01, '?'},
+		encodeTestSCT(want[1]),
+	)
+	cert := newTestCert(t, nil, ext)
+
+	got, err := EmbeddedSCTs(cert)
+	if err != nil {
+		t.Fatalf("EmbeddedSCTs: %v", err)
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("EmbeddedSCTs: got %v, want %v", got, want)
 	}
 }
 
@@ -174,29 +182,35 @@ func newTestCert(t *testing.T, serial *big.Int, extra *pkix.Extension) *x509.Cer
 func buildSCTExtension(t *testing.T, scts []SCT) *pkix.Extension {
 	t.Helper()
 
-	var list []byte
+	serialized := make([][]byte, 0, len(scts))
 	for _, s := range scts {
-		var ser []byte
-		ser = append(ser, 0x00) // version v1
-		ser = append(ser, s.LogID[:]...)
-		ts := make([]byte, 8)
-		binary.BigEndian.PutUint64(ts, uint64(s.Timestamp))
-		ser = append(ser, ts...)
-		ser = append(ser, 0x00, 0x00) // empty CtExtensions (uint16 length-prefix)
-
-		// Skip signature: EmbeddedSCTs reads up through the extensions
-		// length-prefix and then discards the rest of the SerializedSCT,
-		// so we don't need to append anything for it.
-
-		var lenBuf [2]byte
-		binary.BigEndian.PutUint16(lenBuf[:], uint16(len(ser)))
-		list = append(list, lenBuf[:]...)
-		list = append(list, ser...)
+		serialized = append(serialized, encodeTestSCT(s))
 	}
+	return buildSerializedSCTExtension(t, serialized...)
+}
 
-	var listLenBuf [2]byte
-	binary.BigEndian.PutUint16(listLenBuf[:], uint16(len(list)))
-	inner := append(listLenBuf[:], list...)
+func encodeTestSCT(s SCT) []byte {
+	ser := []byte{0x00} // version v1
+	ser = append(ser, s.LogID[:]...)
+	ser = binary.BigEndian.AppendUint64(ser, uint64(s.Timestamp))
+	ser = append(ser, 0x00, 0x00) // empty CtExtensions (uint16 length-prefix)
+
+	// Skip signature: EmbeddedSCTs reads up through the extensions
+	// length-prefix and then discards the rest of the SerializedSCT,
+	// so we don't need to append anything for it.
+	return ser
+}
+
+func buildSerializedSCTExtension(t *testing.T, scts ...[]byte) *pkix.Extension {
+	t.Helper()
+
+	var list []byte
+	for _, sct := range scts {
+		list = binary.BigEndian.AppendUint16(list, uint16(len(sct)))
+		list = append(list, sct...)
+	}
+	inner := binary.BigEndian.AppendUint16(nil, uint16(len(list)))
+	inner = append(inner, list...)
 
 	return &pkix.Extension{
 		Id:    embeddedSCTOID,
